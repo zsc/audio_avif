@@ -1,0 +1,129 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Compression via Mel-Spectrogram Image</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .sample { margin-bottom: 40px; border-bottom: 1px solid #eee; padding-bottom: 20px; }
+        .controls { margin-bottom: 15px; }
+        .comparison { display: flex; gap: 20px; }
+        .panel { flex: 1; }
+        .spectrogram-container { position: relative; margin-top: 10px; background: #000; overflow-x: auto; }
+        .spectrogram-img { display: block; height: 150px; width: 100%; object-fit: cover; image-rendering: pixelated; }
+        .cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0; pointer-events: none; }
+        audio { width: 100%; margin-top: 5px; }
+        h3 { margin-top: 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Audio Compression via AVIF Mel-Spectrogram</h1>
+        <p>Using <code>microsoft/speecht5_hifigan</code> for vocoding.</p>
+        
+        <div id="samples">
+            <!-- Samples will be injected here -->
+        </div>
+    </div>
+
+    <script>
+        const data = [{"name": "paralingustic_prompt", "original": "paralingustic_prompt/original.wav", "original_mel": "paralingustic_prompt/original_mel.png", "variants": {"70": {"avif": "paralingustic_prompt/q70.avif", "wav": "paralingustic_prompt/q70_recon.wav", "wav_size": 142764, "avif_size": 1817}, "80": {"avif": "paralingustic_prompt/q80.avif", "wav": "paralingustic_prompt/q80_recon.wav", "wav_size": 142764, "avif_size": 2499}, "85": {"avif": "paralingustic_prompt/q85.avif", "wav": "paralingustic_prompt/q85_recon.wav", "wav_size": 142764, "avif_size": 3280}, "90": {"avif": "paralingustic_prompt/q90.avif", "wav": "paralingustic_prompt/q90_recon.wav", "wav_size": 142764, "avif_size": 4500}, "95": {"avif": "paralingustic_prompt/q95.avif", "wav": "paralingustic_prompt/q95_recon.wav", "wav_size": 142764, "avif_size": 6530}}}];
+
+        function renderSamples() {
+            const container = document.getElementById('samples');
+            data.forEach((sample, index) => {
+                const div = document.createElement('div');
+                div.className = 'sample';
+                
+                // Default quality
+                const defaultQ = "90"; 
+                
+                div.innerHTML = `
+                    <h2>${sample.name}</h2>
+                    <div class="controls">
+                        <label>AVIF Quality: 
+                            <select id="sel-${index}" onchange="updateSample(${index})">
+                                ${Object.keys(sample.variants).map(q => `<option value="${q}" ${q === defaultQ ? 'selected' : ''}>${q}</option>`).join('')}
+                            </select>
+                        </label>
+                    </div>
+                    
+                    <div class="comparison">
+                        <div class="panel">
+                            <h3>Original (Resampled 16kHz)</h3>
+                            <audio id="audio-orig-${index}" controls src="${sample.original}" ontimeupdate="updateCursor(${index}, 'orig')"></audio>
+                            <div class="spectrogram-container" id="spec-container-orig-${index}">
+                                <img src="${sample.original_mel}" class="spectrogram-img"> 
+                                <div id="cursor-orig-${index}" class="cursor"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="panel">
+                            <h3>Reconstructed (from AVIF Q<span id="lbl-q-${index}">${defaultQ}</span>)</h3>
+                            <audio id="audio-recon-${index}" controls src="${sample.variants[defaultQ].wav}" ontimeupdate="updateCursor(${index}, 'recon')"></audio>
+                            <div class="spectrogram-container" id="spec-container-recon-${index}">
+                                <img id="img-recon-${index}" src="${sample.variants[defaultQ].avif}" class="spectrogram-img">
+                                <div id="cursor-recon-${index}" class="cursor"></div>
+                            </div>
+                            <div id="info-${index}" style="margin-top: 10px; font-family: monospace; background: #eee; padding: 10px; border-radius: 4px;">
+                                <!-- Sizes and Ratio will be injected here -->
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(div);
+                
+                // Init size and info
+                setTimeout(() => updateSample(index), 100);
+            });
+        }
+        
+        function updateSample(index) {
+            const sel = document.getElementById(`sel-${index}`);
+            // Safety check in case element isn't ready
+            if (!sel) return;
+            
+            const q = sel.value;
+            const sample = data[index];
+            const variant = sample.variants[q];
+            
+            // Update Right Side
+            document.getElementById(`lbl-q-${index}`).innerText = q;
+            document.getElementById(`audio-recon-${index}`).src = variant.wav;
+            document.getElementById(`img-recon-${index}`).src = variant.avif;
+            
+            // Update Info
+            const wavKB = (variant.wav_size / 1024).toFixed(2);
+            const avifKB = (variant.avif_size / 1024).toFixed(2);
+            const ratio = (variant.wav_size / variant.avif_size).toFixed(2);
+            
+            document.getElementById(`info-${index}`).innerHTML = 
+                `Original WAV: ${wavKB} KB<br>` +
+                `AVIF Image:   ${avifKB} KB<br>` +
+                `<strong>Compression Ratio: ${ratio}x</strong>`;
+        }
+        
+        function updateSize(index, q) {
+            // Deprecated, handled in updateSample
+        }
+
+        function updateCursor(index, side) {
+            const audio = document.getElementById(`audio-${side}-${index}`);
+            const cursor = document.getElementById(`cursor-${side}-${index}`);
+            const duration = audio.duration;
+            const current = audio.currentTime;
+            
+            if (duration > 0) {
+                const percent = (current / duration) * 100;
+                cursor.style.left = percent + "%";
+            }
+        }
+
+        renderSamples();
+    </script>
+</body>
+</html>
+    
