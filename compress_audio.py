@@ -34,7 +34,7 @@ def generate_html(output_dir, results):
 </head>
 <body>
     <div class="container">
-        <h1>Audio Compression via AVIF Mel-Spectrogram</h1>
+        <h1>Audio Compression via Image Mel-Spectrogram</h1>
         <p>Using <code>microsoft/speecht5_hifigan</code> for vocoding.</p>
         
         <div id="samples">
@@ -57,7 +57,7 @@ def generate_html(output_dir, results):
                 div.innerHTML = `
                     <h2>${sample.name}</h2>
                     <div class="controls">
-                        <label>AVIF Quality: 
+                        <label>Image Quality: 
                             <select id="sel-${index}" onchange="updateSample(${index})">
                                 ${Object.keys(sample.variants).map(q => `<option value="${q}" ${q === defaultQ ? 'selected' : ''}>${q}</option>`).join('')}
                             </select>
@@ -75,10 +75,10 @@ def generate_html(output_dir, results):
                         </div>
                         
                         <div class="panel">
-                            <h3>Reconstructed (from AVIF Q<span id="lbl-q-${index}">${defaultQ}</span>)</h3>
+                            <h3>Reconstructed (from Q<span id="lbl-q-${index}">${defaultQ}</span>)</h3>
                             <audio id="audio-recon-${index}" controls src="${sample.variants[defaultQ].wav}" ontimeupdate="updateCursor(${index}, 'recon')"></audio>
                             <div class="spectrogram-container" id="spec-container-recon-${index}">
-                                <img id="img-recon-${index}" src="${sample.variants[defaultQ].avif}" class="spectrogram-img">
+                                <img id="img-recon-${index}" src="${sample.variants[defaultQ].image}" class="spectrogram-img">
                                 <div id="cursor-recon-${index}" class="cursor"></div>
                             </div>
                             <div id="info-${index}" style="margin-top: 10px; font-family: monospace; background: #eee; padding: 10px; border-radius: 4px;">
@@ -106,16 +106,16 @@ def generate_html(output_dir, results):
             // Update Right Side
             document.getElementById(`lbl-q-${index}`).innerText = q;
             document.getElementById(`audio-recon-${index}`).src = variant.wav;
-            document.getElementById(`img-recon-${index}`).src = variant.avif;
+            document.getElementById(`img-recon-${index}`).src = variant.image;
             
             // Update Info
             const wavKB = (variant.wav_size / 1024).toFixed(2);
-            const avifKB = (variant.avif_size / 1024).toFixed(2);
-            const ratio = (variant.wav_size / variant.avif_size).toFixed(2);
+            const imageKB = (variant.image_size / 1024).toFixed(2);
+            const ratio = (variant.wav_size / variant.image_size).toFixed(2);
             
             document.getElementById(`info-${index}`).innerHTML = 
                 `Original WAV: ${wavKB} KB<br>` +
-                `AVIF Image:   ${avifKB} KB<br>` +
+                `Image File:   ${imageKB} KB<br>` +
                 `<strong>Compression Ratio: ${ratio}x</strong>`;
         }
         
@@ -148,10 +148,10 @@ def generate_html(output_dir, results):
     with open(os.path.join(output_dir, 'index.html'), 'w') as f:
         f.write(final_html)
 
-def decode_file(input_avif, output_wav, device, vocoder):
-    print(f"Decoding {input_avif} -> {output_wav}...")
+def decode_file(input_img, output_wav, device, vocoder):
+    print(f"Decoding {input_img} -> {output_wav}...")
     try:
-        img = Image.open(input_avif)
+        img = Image.open(input_img)
         logmel, rms = audio_avif.image_to_logmel(img)
         wav = audio_avif.reconstruct_wav(logmel, vocoder, device)
         
@@ -162,16 +162,18 @@ def decode_file(input_avif, output_wav, device, vocoder):
         sf.write(output_wav, wav, audio_avif.TARGET_SR)
         print(f"Success. Saved to {output_wav}")
     except Exception as e:
-        print(f"Error decoding {input_avif}: {e}")
+        print(f"Error decoding {input_img}: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Compress/Decompress audio via Mel-Spectrogram AVIF image.")
-    parser.add_argument("input", help="Input file (WAV or AVIF) or directory (WAVs).")
+    parser = argparse.ArgumentParser(description="Compress/Decompress audio via Mel-Spectrogram image (AVIF or JPEG).")
+    parser.add_argument("input", help="Input file (WAV, AVIF, or JPEG) or directory (WAVs).")
     parser.add_argument("--output", default=None, help="Output directory (for batch/demo) or filename (for single file). Defaults to 'output' for batch.")
+    parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
     args = parser.parse_args()
 
     # Determine mode based on input extension
-    is_decoding = os.path.isfile(args.input) and args.input.lower().endswith('.avif')
+    input_ext = os.path.splitext(args.input)[1].lower()
+    is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg']
     
     # Setup device and model
     device = audio_avif.get_device()
@@ -215,6 +217,10 @@ def main():
     
     results = []
 
+    # Format settings
+    img_ext = "jpg" if args.jpg else "avif"
+    img_format = "JPEG" if args.jpg else "AVIF"
+
     for wav_file in files:
         print(f"Processing {wav_file}...")
         base_name = os.path.splitext(os.path.basename(wav_file))[0]
@@ -245,14 +251,14 @@ def main():
             # Mel -> Image
             img = audio_avif.logmel_to_image(logmel, rms=rms)
             
-            # Save AVIF
-            avif_path = os.path.join(file_output_dir, f"q{q}.avif")
-            img.save(avif_path, "AVIF", quality=q, exif=img.getexif())
-            avif_size = os.path.getsize(avif_path)
+            # Save Compressed Image
+            img_path = os.path.join(file_output_dir, f"q{q}.{img_ext}")
+            img.save(img_path, img_format, quality=q, exif=img.getexif())
+            compressed_img_size = os.path.getsize(img_path)
             
-            # Load AVIF
+            # Load Compressed Image
             # Note: opening and converting back ensures we see compression artifacts
-            img_loaded = Image.open(avif_path)
+            img_loaded = Image.open(img_path)
             
             # Image -> Mel
             logmel_recon, rms_recon = audio_avif.image_to_logmel(img_loaded)
@@ -270,12 +276,12 @@ def main():
             
             # Relative paths for HTML
             variants[str(q)] = {
-                'avif': os.path.relpath(avif_path, output_dir),
+                'image': os.path.relpath(img_path, output_dir),
                 'wav': os.path.relpath(wav_recon_path, output_dir),
                 'wav_size': orig_wav_size,
-                'avif_size': avif_size
+                'image_size': compressed_img_size
             }
-            print(f"  Quality {q}: Saved AVIF and Reconstructed WAV.")
+            print(f"  Quality {q}: Saved {img_format} and Reconstructed WAV.")
 
         results.append({
             'name': base_name,

@@ -23,16 +23,16 @@
 - **Mel 滤波器**: 80 bands, 频率范围 80Hz - 7600Hz
 - **关键细节**: 使用 **Slaney** 风格的 Mel 刻度和归一化 (Area Normalization)，取 $log_{10}$ 幅度谱 (with floor 1e-10)。
 
-### 2.2 图像映射与压缩 (Mel $\to$ AVIF)
+### 2.2 图像映射与压缩 (Mel $\to$ Image)
 - **数值映射**: 将 Log-Mel 谱的浮点数值（范围约为 -11.0 到 4.0）线性映射到 0-255 的 8-bit 灰度空间。
     - 时间轴映射为图像的**宽度**。
     - 频率轴映射为图像的**高度**（低频在下，高频在上）。
-- **元数据嵌入**: 计算原始音频的 RMS (Root Mean Square) 振幅，并作为元数据（Exif Tag 270 ImageDescription）嵌入到 AVIF 图像中。这确保了解码后的音频能还原到原始响度，避免了神经声码器输出电平不一致的问题。
-- **编码**: 使用 `pillow-avif-plugin` 将灰度图编码为 AVIF 格式。
+- **元数据嵌入**: 计算原始音频的 RMS (Root Mean Square) 振幅，并作为元数据（Exif Tag 270 ImageDescription）嵌入到图像中。这确保了解码后的音频能还原到原始响度。
+- **编码**: 默认使用 `pillow-avif-plugin` 将灰度图编码为 AVIF 格式，也支持使用 JPEG 格式。
     - **Quality**: 支持 70, 80, 85, 90, 95 等不同质量因子，以此控制比特率。
 
-### 2.3 音频重建 (AVIF $\to$ WAV)
-- **解码**: 读取 AVIF 图像，逆映射回浮点 Log-Mel 谱。同时读取 Exif 元数据中的 RMS 值。
+### 2.3 音频重建 (Image $\to$ WAV)
+- **解码**: 读取图像（AVIF 或 JPEG），逆映射回浮点 Log-Mel 谱。同时读取 Exif 元数据中的 RMS 值。
 - **声码器**: 使用预训练的 HiFi-GAN 模型 (`microsoft/speecht5_hifigan`) 将 Mel 谱还原为时域波形。
 - **响度恢复**: 根据读取的 RMS 值对重建波形进行增益调整，使其响度与原始音频一致。
 
@@ -77,19 +77,23 @@ pip install -e .
 安装后，可以直接使用 `audio-avif` 命令处理音频文件：
 
 1.  **压缩/演示模式**:
-    处理单个 WAV 文件或整个目录，生成多种质量的 AVIF 和 HTML 对比报告。
+    处理单个 WAV 文件或整个目录，生成多种质量的图像和 HTML 对比报告。
     ```bash
-    audio-avif input.wav --output results_dir
+    # 默认生成 AVIF
+    python3 compress_audio.py input.wav --output results_dir
+    
+    # 使用 JPEG
+    python3 compress_audio.py input.wav --output results_dir --jpg
     ```
 
 2.  **解码模式**:
-    直接将 `.avif` 文件解码为 `.wav`。
+    脚本会根据文件扩展名自动识别输入格式（`.avif`, `.jpg`, `.jpeg`）。
     ```bash
     # 将 input.avif 解码为 input.wav
-    audio-avif input.avif
+    python3 compress_audio.py input.avif
     
-    # 指定输出文件名
-    audio-avif input.avif --output output.wav
+    # 将 input.jpg 解码为 output.wav
+    python3 compress_audio.py input.jpg --output output.wav
     ```
 
 ### 6.2 Python API (作为编解码库使用)
