@@ -51,15 +51,17 @@ def generate_html(output_dir, results):
                 const div = document.createElement('div');
                 div.className = 'sample';
                 
+    
                 // Default quality
-                const defaultQ = "90"; 
+                const keys = Object.keys(sample.variants);
+                const defaultQ = keys.includes("AVIF Q90") ? "AVIF Q90" : keys[0]; 
                 
                 div.innerHTML = `
                     <h2>${sample.name}</h2>
                     <div class="controls">
-                        <label>Image Quality: 
+                        <label>Variant: 
                             <select id="sel-${index}" onchange="updateSample(${index})">
-                                ${Object.keys(sample.variants).map(q => `<option value="${q}" ${q === defaultQ ? 'selected' : ''}>${q}</option>`).join('')}
+                                ${keys.map(q => `<option value="${q}" ${q === defaultQ ? 'selected' : ''}>${q}</option>`).join('')}
                             </select>
                         </label>
                     </div>
@@ -75,7 +77,7 @@ def generate_html(output_dir, results):
                         </div>
                         
                         <div class="panel">
-                            <h3>Reconstructed (from Q<span id="lbl-q-${index}">${defaultQ}</span>)</h3>
+                            <h3>Reconstructed (from <span id="lbl-q-${index}">${defaultQ}</span>)</h3>
                             <audio id="audio-recon-${index}" controls src="${sample.variants[defaultQ].wav}" ontimeupdate="updateCursor(${index}, 'recon')"></audio>
                             <div class="spectrogram-container" id="spec-container-recon-${index}">
                                 <img id="img-recon-${index}" src="${sample.variants[defaultQ].image}" class="spectrogram-img">
@@ -115,7 +117,7 @@ def generate_html(output_dir, results):
             
             document.getElementById(`info-${index}`).innerHTML = 
                 `Original WAV: ${wavKB} KB<br>` +
-                `Image File:   ${imageKB} KB<br>` +
+                `Compressed:   ${imageKB} KB<br>` +
                 `<strong>Compression Ratio: ${ratio}x</strong>`;
         }
         
@@ -151,8 +153,12 @@ def generate_html(output_dir, results):
 def decode_file(input_img, output_wav, device, vocoder):
     print(f"Decoding {input_img} -> {output_wav}...")
     try:
-        img = Image.open(input_img)
-        logmel, rms = audio_avif.image_to_logmel(img)
+        if input_img.lower().endswith('.webp'):
+            logmel, rms = audio_avif.webp_anim_to_logmel(input_img)
+        else:
+            img = Image.open(input_img)
+            logmel, rms = audio_avif.image_to_logmel(img)
+            
         wav = audio_avif.reconstruct_wav(logmel, vocoder, device)
         
         if rms is not None:
@@ -166,15 +172,16 @@ def decode_file(input_img, output_wav, device, vocoder):
 
 def main():
     parser = argparse.ArgumentParser(description="Compress/Decompress audio via Mel-Spectrogram image (AVIF or JPEG).")
-    parser.add_argument("input", help="Input file (WAV, AVIF, or JPEG) or directory (WAVs).")
+    parser.add_argument("input", help="Input file (WAV, AVIF, JPEG, WEBP) or directory (WAVs).")
     parser.add_argument("--output", default=None, help="Output directory (for batch/demo) or filename (for single file). Defaults to 'output' for batch.")
     parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
+    parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
     args = parser.parse_args()
 
     # Determine mode based on input extension
     input_ext = os.path.splitext(args.input)[1].lower()
-    is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg']
+    is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg', '.webp']
     
     # Setup device and model
     device = audio_avif.get_device()
@@ -222,6 +229,7 @@ def main():
     img_ext = "jpg" if args.jpg else "avif"
     img_format = "JPEG" if args.jpg else "AVIF"
     use_square = args.sq
+    use_webp = args.webp_video
 
     for wav_file in files:
         print(f"Processing {wav_file}...")
@@ -249,6 +257,7 @@ def main():
 
         variants = {}
 
+        # Standard AVIF/JPEG Loop
         for q in audio_avif.QUALITIES:
             # Mel -> Image
             img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square)
@@ -259,10 +268,9 @@ def main():
             compressed_img_size = os.path.getsize(img_path)
             
             # Load Compressed Image
-            # Note: opening and converting back ensures we see compression artifacts
             img_loaded = Image.open(img_path)
             
-            # Image -> Mel (Automatic un-reshape via metadata)
+            # Image -> Mel
             logmel_recon, rms_recon = audio_avif.image_to_logmel(img_loaded)
             
             # Mel -> Wav
@@ -276,14 +284,43 @@ def main():
             wav_recon_path = os.path.join(file_output_dir, f"q{q}_recon.wav")
             sf.write(wav_recon_path, wav_recon, audio_avif.TARGET_SR)
             
-            # Relative paths for HTML
-            variants[str(q)] = {
+            # Use distinct keys
+            key = f"{img_format} Q{q}"
+            variants[key] = {
                 'image': os.path.relpath(img_path, output_dir),
                 'wav': os.path.relpath(wav_recon_path, output_dir),
                 'wav_size': orig_wav_size,
                 'image_size': compressed_img_size
             }
-            print(f"  Quality {q}: Saved {img_format} and Reconstructed WAV.")
+            print(f"  {key}: Saved and Reconstructed.")
+
+        # Optional WebP Loop
+        if use_webp:
+            for q in audio_avif.QUALITIES:
+                webp_path = os.path.join(file_output_dir, f"webp_video_q{q}.webp")
+                
+                # Encode (this handles chunking internally)
+                # Chunk width 128 (approx 2s)
+                audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128)
+                compressed_img_size = os.path.getsize(webp_path)
+                
+                # Decode
+                logmel_recon, rms_recon = audio_avif.webp_anim_to_logmel(webp_path)
+                wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
+                if rms_recon:
+                    wav_recon = audio_avif.apply_loudness(wav_recon, rms_recon)
+                    
+                wav_recon_path = os.path.join(file_output_dir, f"webp_video_q{q}_recon.wav")
+                sf.write(wav_recon_path, wav_recon, audio_avif.TARGET_SR)
+                
+                key = f"WebP-Video Q{q}"
+                variants[key] = {
+                    'image': os.path.relpath(webp_path, output_dir),
+                    'wav': os.path.relpath(wav_recon_path, output_dir),
+                    'wav_size': orig_wav_size,
+                    'image_size': compressed_img_size
+                }
+                print(f"  {key}: Saved and Reconstructed.")
 
         results.append({
             'name': base_name,

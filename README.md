@@ -28,12 +28,13 @@
     - 时间轴映射为图像的**宽度**。
     - 频率轴映射为图像的**高度**（低频在下，高频在上）。
 - **重排 (Reshaping)**: 可选功能。为了提高图像编码效率，可通过 `--sq` 参数将细长的频谱图切片并堆叠成接近方形的图像（宽度按 16 对齐）。解码时根据元数据自动还原。
+- **伪视频模式 (Pseudo-Video)**: 通过 `--webp-video` 参数启用。将长频谱图沿时间轴切分为多个小块（默认约 2 秒/块），并将这些块作为连续帧保存为 **WebP 动图**。这利用了 WebP 对帧间差异的压缩能力（尽管频谱图的“帧间”相关性与普通视频不同），在某些情况下能提供优于单张大图的压缩率。
 - **元数据嵌入**: 计算原始音频的 RMS (Root Mean Square) 振幅，并作为元数据（Exif Tag 270 ImageDescription）嵌入到图像中。这确保了解码后的音频能还原到原始响度。
-- **编码**: 默认使用 `pillow-avif-plugin` 将灰度图编码为 AVIF 格式，也支持使用 JPEG 格式。
+- **编码**: 默认使用 `pillow-avif-plugin` 将灰度图编码为 AVIF 格式，也支持使用 JPEG 和 WebP (动图) 格式。
     - **Quality**: 支持 70, 80, 85, 90, 95 等不同质量因子，以此控制比特率。
 
 ### 2.3 音频重建 (Image $\to$ WAV)
-- **解码**: 读取图像（AVIF 或 JPEG），逆映射回浮点 Log-Mel 谱。同时读取 Exif 元数据中的 RMS 值。
+- **解码**: 读取图像（AVIF, JPEG 或 WebP），逆映射回浮点 Log-Mel 谱。同时读取 Exif 元数据中的 RMS 值。
 - **声码器**: 使用预训练的 HiFi-GAN 模型 (`microsoft/speecht5_hifigan`) 将 Mel 谱还原为时域波形。
 - **响度恢复**: 根据读取的 RMS 值对重建波形进行增益调整，使其响度与原始音频一致。
 
@@ -81,23 +82,29 @@ pip install -e .
     处理单个 WAV 文件或整个目录，生成多种质量的图像和 HTML 对比报告。
     ```bash
     # 默认生成 AVIF
-    python3 compress_audio.py input.wav --output results_dir
+    audio-avif input.wav --output results_dir
     
     # 使用 JPEG
-    python3 compress_audio.py input.wav --output results_dir --jpg
+    audio-avif input.wav --output results_dir --jpg
 
     # 启用方形重排 (Square Reshaping)
-    python3 compress_audio.py input.wav --output results_dir --sq
+    audio-avif input.wav --output results_dir --sq
+
+    # 启用 WebP 动图模式 (Pseudo-Video)
+    audio-avif input.wav --output results_dir --webp-video
     ```
 
 2.  **解码模式**:
-    脚本会根据文件扩展名自动识别输入格式（`.avif`, `.jpg`, `.jpeg`）。
+    脚本会根据文件扩展名自动识别输入格式（`.avif`, `.jpg`, `.jpeg`, `.webp`）。
     ```bash
     # 将 input.avif 解码为 input.wav
-    python3 compress_audio.py input.avif
+    audio-avif input.avif
     
     # 将 input.jpg 解码为 output.wav
-    python3 compress_audio.py input.jpg --output output.wav
+    audio-avif input.jpg --output output.wav
+
+    # 将 input.webp 解码为 output.wav
+    audio-avif input.webp --output output.wav
     ```
 
 ### 6.2 Python API (作为编解码库使用)

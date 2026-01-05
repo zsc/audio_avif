@@ -151,6 +151,119 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         
     return img
 
+def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64):
+    """
+    Saves logmel as an animated WebP (pseudo-video).
+    logmel: (T, 80) float
+    """
+    # 1. Normalize and quantize
+    min_val, max_val = MIN_DB, MAX_DB
+    norm = (logmel - min_val) / (max_val - min_val)
+    norm = np.clip(norm, 0.0, 1.0)
+    uint8_data = (norm * 255.0).astype(np.uint8)
+    
+    # Orientation: (80, T)
+    img_data = np.flipud(uint8_data.T) # (80, T)
+    H, T = img_data.shape
+    
+    # 2. Chunking
+    frames = []
+    
+    # Ensure all chunks are same size by padding the last one if needed
+    # WebP/Video often prefers even dimensions. 80 is even. chunk_width should be even.
+    num_chunks = math.ceil(T / chunk_width)
+    
+    for i in range(num_chunks):
+        start = i * chunk_width
+        end = start + chunk_width
+        chunk = img_data[:, start:end]
+        
+        # Pad if last chunk is smaller
+        if chunk.shape[1] < chunk_width:
+            pad_w = chunk_width - chunk.shape[1]
+            padding = np.zeros((H, pad_w), dtype=np.uint8)
+            chunk = np.hstack([chunk, padding])
+            
+        frames.append(Image.fromarray(chunk, mode='L'))
+        
+    # 3. Metadata
+    metadata = {'rms': rms, 'orig_w': T, 'chunk_w': chunk_width}
+    exif_bytes = None
+    
+    # Create a dummy image to generate EXIF bytes
+    dummy = Image.new('L', (1,1))
+    exif = dummy.getexif()
+    exif[270] = json.dumps(metadata)
+    exif_bytes = exif.tobytes()
+
+    # 4. Save
+    # Pillow supports saving animated WebP.
+    # We use lossy compression (quality < 100).
+    # method=6 is slowest/best compression.
+    if frames:
+        frames[0].save(
+            output_path,
+            format='WEBP',
+            save_all=True,
+            append_images=frames[1:],
+            duration=33, # roughly 30fps, doesn't matter for audio reconstruction but needed for players
+            loop=0,
+            quality=quality,
+            method=6,
+            exif=exif_bytes
+        )
+
+def webp_anim_to_logmel(image_path, min_val=MIN_DB, max_val=MAX_DB):
+    """
+    Reads animated WebP, reconstructs logmel (T, 80).
+    """
+    img = Image.open(image_path)
+    
+    # Extract Metadata
+    rms = None
+    orig_w = None
+    
+    exif = img.getexif()
+    if exif and 270 in exif:
+        try:
+            meta = json.loads(exif[270])
+            rms = meta.get('rms')
+            orig_w = meta.get('orig_w')
+        except:
+            pass
+            
+    # Iterate frames
+    frames_data = []
+    try:
+        while True:
+            # Convert to grayscale and numpy
+            frame = img.convert('L')
+            frames_data.append(np.array(frame))
+            img.seek(img.tell() + 1)
+    except EOFError:
+        pass
+        
+    if not frames_data:
+        raise ValueError("No frames found in WebP")
+        
+    # Concatenate horizontally
+    # Each frame is (H, chunk_w)
+    full_img = np.hstack(frames_data) # (H, total_w)
+    
+    # Crop to original width
+    if orig_w is not None:
+        full_img = full_img[:, :orig_w]
+        
+    # Convert back to logmel
+    # Flip back
+    full_img = np.flipud(full_img)
+    
+    # Transpose (80, T) -> (T, 80)
+    logmel_norm = full_img.astype(np.float32).T / 255.0
+    logmel = logmel_norm * (max_val - min_val) + min_val
+    
+    return logmel, rms
+
 def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
     """
     Converts PIL Image to (T, 80) logmel.
