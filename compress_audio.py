@@ -175,13 +175,14 @@ def main():
     parser.add_argument("input", help="Input file (WAV, AVIF, JPEG, WEBP) or directory (WAVs).")
     parser.add_argument("--output", default=None, help="Output directory (for batch/demo) or filename (for single file). Defaults to 'output' for batch.")
     parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
+    parser.add_argument("--png", action="store_true", help="Use PNG (Lossless) instead of AVIF.")
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
     args = parser.parse_args()
 
     # Determine mode based on input extension
     input_ext = os.path.splitext(args.input)[1].lower()
-    is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg', '.webp']
+    is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg', '.webp', '.png']
     
     # Setup device and model
     device = audio_avif.get_device()
@@ -226,8 +227,19 @@ def main():
     results = []
 
     # Format settings
-    img_ext = "jpg" if args.jpg else "avif"
-    img_format = "JPEG" if args.jpg else "AVIF"
+    if args.png:
+        img_ext = "png"
+        img_format = "PNG"
+        qualities = [0] # Dummy quality for loop
+    elif args.jpg:
+        img_ext = "jpg"
+        img_format = "JPEG"
+        qualities = audio_avif.QUALITIES
+    else:
+        img_ext = "avif"
+        img_format = "AVIF"
+        qualities = audio_avif.QUALITIES
+
     use_square = args.sq
     use_webp = args.webp_video
 
@@ -257,14 +269,21 @@ def main():
 
         variants = {}
 
-        # Standard AVIF/JPEG Loop
-        for q in audio_avif.QUALITIES:
+        # Standard AVIF/JPEG/PNG Loop
+        for q in qualities:
             # Mel -> Image
             img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square)
             
             # Save Compressed Image
             img_path = os.path.join(file_output_dir, f"q{q}.{img_ext}")
-            img.save(img_path, img_format, quality=q, exif=img.getexif())
+            
+            if img_format == "PNG":
+                img.save(img_path, img_format, exif=img.getexif())
+                key = "PNG Lossless"
+            else:
+                img.save(img_path, img_format, quality=q, exif=img.getexif())
+                key = f"{img_format} Q{q}"
+
             compressed_img_size = os.path.getsize(img_path)
             
             # Load Compressed Image
