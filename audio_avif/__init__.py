@@ -9,6 +9,7 @@ import torchaudio
 from transformers import SpeechT5HifiGan
 from PIL import Image
 import pillow_avif
+from scipy.ndimage import gaussian_filter1d
 
 # Constants
 TARGET_SR = 16000
@@ -83,7 +84,7 @@ def wav_to_logmel(wav_path):
 
     return logmel.T.astype(np.float32), float(rms) # Return (T, 80), rms
 
-def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0):
+def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0, gaussian_blur=None):
     """
     Converts (T, 80) float logmel to PIL Image (Grayscale).
     
@@ -91,6 +92,7 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         reshape (bool): If True, reshapes long spectrograms into a roughly square image
                         by stacking time slices vertically. This often improves compression.
         stretch (float): Horizontal stretch factor. 2.0 means 2x width, 0.5 means 0.5x width.
+        gaussian_blur (tuple): (kernel_size, sigma) for 1D horizontal Gaussian blur.
     """
     # Normalize to 0-1
     norm = (logmel - min_val) / (max_val - min_val)
@@ -105,6 +107,15 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
     # And flipud so low freq is at bottom
     img_data = np.flipud(uint8_data.T) # (80, T)
     
+    if gaussian_blur is not None:
+        kernel_size, sigma = gaussian_blur
+        if sigma > 0:
+            # radius = (kernel_size - 1) / 2
+            # truncate = radius / sigma
+            truncate = ((kernel_size - 1) / 2.0) / sigma
+            img_data = gaussian_filter1d(img_data, sigma=sigma, axis=1, truncate=truncate)
+            img_data = np.clip(img_data, 0, 255).astype(np.uint8)
+
     original_width = img_data.shape[1]
     metadata = {}
     
@@ -163,7 +174,7 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         
     return img
 
-def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64):
+def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, gaussian_blur=None):
     """
     Saves logmel as an animated WebP (pseudo-video).
     logmel: (T, 80) float
@@ -176,6 +187,14 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64):
     
     # Orientation: (80, T)
     img_data = np.flipud(uint8_data.T) # (80, T)
+
+    if gaussian_blur is not None:
+        kernel_size, sigma = gaussian_blur
+        if sigma > 0:
+            truncate = ((kernel_size - 1) / 2.0) / sigma
+            img_data = gaussian_filter1d(img_data, sigma=sigma, axis=1, truncate=truncate)
+            img_data = np.clip(img_data, 0, 255).astype(np.uint8)
+
     H, T = img_data.shape
     
     # 2. Chunking
