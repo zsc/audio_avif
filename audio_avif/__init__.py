@@ -83,13 +83,14 @@ def wav_to_logmel(wav_path):
 
     return logmel.T.astype(np.float32), float(rms) # Return (T, 80), rms
 
-def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False):
+def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0):
     """
     Converts (T, 80) float logmel to PIL Image (Grayscale).
     
     Args:
         reshape (bool): If True, reshapes long spectrograms into a roughly square image
                         by stacking time slices vertically. This often improves compression.
+        stretch (float): Horizontal stretch factor. 2.0 means 2x width, 0.5 means 0.5x width.
     """
     # Normalize to 0-1
     norm = (logmel - min_val) / (max_val - min_val)
@@ -110,9 +111,20 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
     if rms is not None:
         metadata['rms'] = rms
 
+    if stretch != 1.0:
+        new_w = int(round(original_width * stretch))
+        # Use PIL for resizing
+        img_temp = Image.fromarray(img_data)
+        img_temp = img_temp.resize((new_w, 80), resample=Image.Resampling.BILINEAR)
+        img_data = np.array(img_temp)
+        
+        # Metadata for restoration is NOT saved, allowing time-stretching effect.
+
+    current_width = img_data.shape[1]
+
     if reshape:
         # Square heuristic
-        T = original_width
+        T = current_width
         # Target roughly square: Side ~ sqrt(80 * T)
         # Number of strips k = Side / 80 = sqrt(T/80)
         k = max(1, int(round(math.sqrt(T / 80.0))))
@@ -137,9 +149,9 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         chunks = [img_data[:, i*width_per_strip : (i+1)*width_per_strip] for i in range(k)]
         img_data = np.vstack(chunks) # (80*k, width_per_strip)
         
-        metadata['orig_w'] = original_width
+        metadata['orig_w'] = current_width
 
-    img = Image.fromarray(img_data, mode='L')
+    img = Image.fromarray(img_data)
     
     if metadata:
         exif = img.getexif()
@@ -184,7 +196,7 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64):
             padding = np.zeros((H, pad_w), dtype=np.uint8)
             chunk = np.hstack([chunk, padding])
             
-        frames.append(Image.fromarray(chunk, mode='L'))
+        frames.append(Image.fromarray(chunk))
         
     # 3. Metadata
     metadata = {'rms': rms, 'orig_w': T, 'chunk_w': chunk_width}

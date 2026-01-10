@@ -177,6 +177,7 @@ def main():
     parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
     parser.add_argument("--png", action="store_true", help="Use PNG (Lossless) instead of AVIF.")
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
+    parser.add_argument("--stretch", type=float, default=1.0, help="Horizontal stretch factor (e.g. 2.0 for 2x width, 0.5 for 0.5x width).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
     args = parser.parse_args()
 
@@ -272,7 +273,7 @@ def main():
         # Standard AVIF/JPEG/PNG Loop
         for q in qualities:
             # Mel -> Image
-            img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square)
+            img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square, stretch=args.stretch)
             
             # Save Compressed Image
             img_path = os.path.join(file_output_dir, f"q{q}.{img_ext}")

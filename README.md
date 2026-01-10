@@ -28,6 +28,7 @@
     - 时间轴映射为图像的**宽度**。
     - 频率轴映射为图像的**高度**（低频在下，高频在上）。
 - **重排 (Reshaping)**: 可选功能。为了提高图像编码效率，可通过 `--sq` 参数将细长的频谱图切片并堆叠成接近方形的图像（宽度按 16 对齐）。解码时根据元数据自动还原。
+- **水平拉伸 (Stretching)**: 可选功能。通过 `--stretch` 参数（如 `--stretch 2.0`）在宽度方向对频谱图进行重采样。由于解码时不会自动缩放回原长，这会直接改变重建音频的时长（如拉伸 2 倍会导致音频播放速度减慢一倍）。该选项可用于实验不同像素密度下的编码表现，或作为一种简单的变速手段。
 - **伪视频模式 (Pseudo-Video)**: 通过 `--webp-video` 参数启用。将长频谱图沿时间轴切分为多个小块（默认约 2 秒/块），并将这些块作为连续帧保存为 **WebP 动图**。这利用了 WebP 对帧间差异的压缩能力（尽管频谱图的“帧间”相关性与普通视频不同），在某些情况下能提供优于单张大图的压缩率。
 - **元数据嵌入**: 计算原始音频的 RMS (Root Mean Square) 振幅，并作为元数据（Exif Tag 270 ImageDescription）嵌入到图像中。这确保了解码后的音频能还原到原始响度。
 - **编码**: 默认使用 `pillow-avif-plugin` 将灰度图编码为 AVIF 格式，也支持使用 JPEG 和 WebP (动图) 格式。
@@ -89,6 +90,9 @@ pip install -e .
 
     # 启用方形重排 (Square Reshaping)
     audio-avif input.wav --output results_dir --sq
+
+    # 启用水平拉伸 (如 2 倍拉伸，会使重建音频变慢一倍)
+    audio-avif input.wav --output results_dir --stretch 2.0
 
     # 启用 WebP 动图模式 (Pseudo-Video)
     audio-avif input.wav --output results_dir --webp-video
