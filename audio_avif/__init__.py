@@ -84,7 +84,7 @@ def wav_to_logmel(wav_path):
 
     return logmel.T.astype(np.float32), float(rms) # Return (T, 80), rms
 
-def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0, gaussian_blur=None):
+def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0, gaussian_blur=None, horizontal_usm=None):
     """
     Converts (T, 80) float logmel to PIL Image (Grayscale).
     
@@ -93,6 +93,7 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
                         by stacking time slices vertically. This often improves compression.
         stretch (float): Horizontal stretch factor. 2.0 means 2x width, 0.5 means 0.5x width.
         gaussian_blur (tuple): (kernel_size, sigma) for 1D horizontal Gaussian blur.
+        horizontal_usm (tuple): (kernel_size, sigma, strength) for 1D horizontal unsharp mask.
     """
     # Normalize to 0-1
     norm = (logmel - min_val) / (max_val - min_val)
@@ -113,7 +114,16 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
             # radius = (kernel_size - 1) / 2
             # truncate = radius / sigma
             truncate = ((kernel_size - 1) / 2.0) / sigma
-            img_data = gaussian_filter1d(img_data, sigma=sigma, axis=1, truncate=truncate)
+            img_data = gaussian_filter1d(img_data.astype(np.float32), sigma=sigma, axis=1, truncate=truncate)
+            img_data = np.clip(img_data, 0, 255).astype(np.uint8)
+
+    if horizontal_usm is not None:
+        kernel_size, sigma, strength = horizontal_usm
+        if strength != 0:
+            truncate = ((kernel_size - 1) / 2.0) / sigma
+            img_data_f = img_data.astype(np.float32)
+            blurred = gaussian_filter1d(img_data_f, sigma=sigma, axis=1, truncate=truncate)
+            img_data = img_data_f + (img_data_f - blurred) * strength
             img_data = np.clip(img_data, 0, 255).astype(np.uint8)
 
     original_width = img_data.shape[1]
@@ -174,7 +184,7 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         
     return img
 
-def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, gaussian_blur=None):
+def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, gaussian_blur=None, horizontal_usm=None):
     """
     Saves logmel as an animated WebP (pseudo-video).
     logmel: (T, 80) float
@@ -192,7 +202,16 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
         kernel_size, sigma = gaussian_blur
         if sigma > 0:
             truncate = ((kernel_size - 1) / 2.0) / sigma
-            img_data = gaussian_filter1d(img_data, sigma=sigma, axis=1, truncate=truncate)
+            img_data = gaussian_filter1d(img_data.astype(np.float32), sigma=sigma, axis=1, truncate=truncate)
+            img_data = np.clip(img_data, 0, 255).astype(np.uint8)
+
+    if horizontal_usm is not None:
+        kernel_size, sigma, strength = horizontal_usm
+        if strength != 0:
+            truncate = ((kernel_size - 1) / 2.0) / sigma
+            img_data_f = img_data.astype(np.float32)
+            blurred = gaussian_filter1d(img_data_f, sigma=sigma, axis=1, truncate=truncate)
+            img_data = img_data_f + (img_data_f - blurred) * strength
             img_data = np.clip(img_data, 0, 255).astype(np.uint8)
 
     H, T = img_data.shape

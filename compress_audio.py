@@ -180,6 +180,7 @@ def main():
     parser.add_argument("--stretch", type=float, default=1.0, help="Horizontal stretch factor (e.g. 2.0 for 2x width, 0.5 for 0.5x width).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
     parser.add_argument("--horizontal-gaussian", type=str, default=None, help="Add 1D horizontal Gaussian blur, e.g. '10,3' for kernel-size=10, sigma=3.")
+    parser.add_argument("--horizontal-usm", type=str, default=None, help="Add 1D horizontal unsharp mask, e.g. '10,3,0.1' for kernel-size=10, sigma=3, strength=0.1.")
     args = parser.parse_args()
 
     # Parse Gaussian Blur
@@ -190,6 +191,16 @@ def main():
             gaussian_blur = (ks, sig)
         except ValueError:
             print("Invalid --horizontal-gaussian format. Use 'kernel_size,sigma'.")
+            return
+
+    # Parse USM
+    horizontal_usm = None
+    if args.horizontal_usm:
+        try:
+            ks, sig, strg = map(float, args.horizontal_usm.split(','))
+            horizontal_usm = (ks, sig, strg)
+        except ValueError:
+            print("Invalid --horizontal-usm format. Use 'kernel_size,sigma,strength'.")
             return
 
     # Determine mode based on input extension
@@ -284,7 +295,7 @@ def main():
         # Standard AVIF/JPEG/PNG Loop
         for q in qualities:
             # Mel -> Image
-            img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square, stretch=args.stretch, gaussian_blur=gaussian_blur)
+            img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square, stretch=args.stretch, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm)
             
             # Save Compressed Image
             img_path = os.path.join(file_output_dir, f"q{q}.{img_ext}")
@@ -332,7 +343,7 @@ def main():
                 
                 # Encode (this handles chunking internally)
                 # Chunk width 128 (approx 2s)
-                audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128, gaussian_blur=gaussian_blur)
+                audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm)
                 compressed_img_size = os.path.getsize(webp_path)
                 
                 # Decode
