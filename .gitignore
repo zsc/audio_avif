@@ -136,5 +136,4 @@ cython_debug/
 .DS_Store
 
 # Project specific
-output/
 tests/test_data/
