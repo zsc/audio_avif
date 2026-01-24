@@ -30,7 +30,22 @@
     </div>
 
     <script>
-        const data = [{"name": "paralingustic_prompt", "original": "paralingustic_prompt/original.wav", "original_mel": "paralingustic_prompt/original_mel.png", "variants": {"PNG Q0": {"image": "paralingustic_prompt/q0.png", "wav": "paralingustic_prompt/q0_recon.wav", "wav_size": 142764, "image_size": 11858}}}];
+        const data = [
+            {
+                "name": "paralingustic_prompt", 
+                "original": "paralingustic_prompt/original.wav", 
+                "original_mel": "paralingustic_prompt/original_mel.png",
+                "mp3_size": 13832,
+                "variants": {
+                    "PNG Q0": { "image": "paralingustic_prompt/q0.png", "wav": "paralingustic_prompt/q0_recon.wav", "wav_size": 142764, "image_size": 11858 },
+                    "AVIF Q95": { "image": "paralingustic_prompt/q95.avif", "wav": "paralingustic_prompt/q95_recon.wav", "wav_size": 142764, "image_size": 6530 },
+                    "AVIF Q90": { "image": "paralingustic_prompt/q90.avif", "wav": "paralingustic_prompt/q90_recon.wav", "wav_size": 142764, "image_size": 4500 },
+                    "AVIF Q85": { "image": "paralingustic_prompt/q85.avif", "wav": "paralingustic_prompt/q85_recon.wav", "wav_size": 142764, "image_size": 3280 },
+                    "AVIF Q80": { "image": "paralingustic_prompt/q80.avif", "wav": "paralingustic_prompt/q80_recon.wav", "wav_size": 142764, "image_size": 2499 },
+                    "AVIF Q70": { "image": "paralingustic_prompt/q70.avif", "wav": "paralingustic_prompt/q70_recon.wav", "wav_size": 142764, "image_size": 1817 }
+                }
+            }
+        ];
 
         function renderSamples() {
             const container = document.getElementById('samples');
@@ -99,11 +114,13 @@
             
             // Update Info
             const wavKB = (variant.wav_size / 1024).toFixed(2);
+            const mp3KB = (sample.mp3_size / 1024).toFixed(2);
             const imageKB = (variant.image_size / 1024).toFixed(2);
             const ratio = (variant.wav_size / variant.image_size).toFixed(2);
             
             document.getElementById(`info-${index}`).innerHTML = 
                 `Original WAV: ${wavKB} KB<br>` +
+                `MP3 (128kbps): ${mp3KB} KB<br>` +
                 `Compressed:   ${imageKB} KB<br>` +
                 `<strong>Compression Ratio: ${ratio}x</strong>`;
         }
