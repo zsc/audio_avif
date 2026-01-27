@@ -70,10 +70,17 @@ def generate_html(output_dir, results):
                         <div class="panel">
                             <h3>Original (Resampled 16kHz)</h3>
                             <audio id="audio-orig-${index}" controls src="${sample.original}" ontimeupdate="updateCursor(${index}, 'orig')"></audio>
+                            <div style="font-size: 12px; color: #555; margin-top: 6px;">Mel Spectrum</div>
                             <div class="spectrogram-container" id="spec-container-orig-${index}">
                                 <img src="${sample.original_mel}" class="spectrogram-img"> 
                                 <div id="cursor-orig-${index}" class="cursor"></div>
                             </div>
+                            ${sample.original_mfcc ? `
+                                <div style="font-size: 12px; color: #555; margin-top: 10px;">MFCC (Encoding)</div>
+                                <div class="spectrogram-container">
+                                    <img src="${sample.original_mfcc}" class="spectrogram-img">
+                                </div>
+                            ` : ''}
                         </div>
                         
                         <div class="panel">
@@ -186,7 +193,8 @@ def main():
     parser.add_argument("--output", default=None, help="Output directory (for batch/demo) or filename (for single file). Defaults to 'output' for batch.")
     parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
     parser.add_argument("--png", action="store_true", help="Use PNG (Lossless) instead of AVIF.")
-    parser.add_argument("--mfcc", action="store_true", help="Use MFCC features instead of Mel-Spectrogram.")
+    parser.add_argument("--mfcc", type=int, default=None, metavar="HEIGHT",
+                        help="Use MFCC features with given height (n_mfcc) instead of Mel-Spectrogram.")
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
     parser.add_argument("--stretch", type=float, default=1.0, help="Horizontal stretch factor (e.g. 2.0 for 2x width, 0.5 for 0.5x width).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
@@ -243,7 +251,7 @@ def main():
              os.makedirs(output_path, exist_ok=True)
              output_path = os.path.join(output_path, os.path.splitext(os.path.basename(args.input))[0] + ".wav")
              
-        decode_file(args.input, output_path, device, vocoder, is_mfcc=args.mfcc)
+        decode_file(args.input, output_path, device, vocoder, is_mfcc=args.mfcc is not None)
         return
 
     # --- ENCODE/DEMO MODE (Existing Logic) ---
@@ -284,7 +292,8 @@ def main():
 
     use_square = args.sq
     use_webp = args.webp_video
-    use_mfcc = args.mfcc
+    use_mfcc = args.mfcc is not None
+    mfcc_height = args.mfcc
 
     for wav_file in files:
         print(f"Processing {wav_file}...")
@@ -295,13 +304,15 @@ def main():
         # 1. Original -> Data
         try:
             if use_mfcc:
-                # Use MFCC
-                data_orig, rms = audio_avif.wav_to_mfcc(wav_file)
+                # Use MFCC for encoding, but keep Mel for display
+                data_orig, rms = audio_avif.wav_to_mfcc(wav_file, n_mfcc=mfcc_height)
                 data_type = 'mfcc'
+                logmel_display, _ = audio_avif.wav_to_logmel(wav_file)  # (T, 80)
             else:
                 # Use LogMel
                 data_orig, rms = audio_avif.wav_to_logmel(wav_file) # (T, 80)
                 data_type = 'mel'
+                logmel_display = data_orig
         except Exception as e:
             print(f"Error reading {wav_file}: {e}")
             continue
@@ -312,11 +323,18 @@ def main():
         sf.write(orig_wav_path, wav_orig, audio_avif.TARGET_SR)
         orig_wav_size = os.path.getsize(orig_wav_path)
         
-        # Save Original Data as PNG (Lossless) - ALWAYS Linear (reshape=False) for visualization
+        # Save Original Mel as PNG (Lossless) - ALWAYS Linear (reshape=False) for visualization
         # We pass explicit metadata for consistency
-        img_orig = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': data_type}, reshape=False)
+        img_orig_mel = audio_avif.matrix_to_image(logmel_display, metadata={'rms': rms, 'type': 'mel'}, reshape=False)
         orig_mel_path = os.path.join(file_output_dir, "original_mel.png")
-        img_orig.save(orig_mel_path, "PNG", exif=img_orig.getexif()) # Explicitly save Exif
+        img_orig_mel.save(orig_mel_path, "PNG", exif=img_orig_mel.getexif()) # Explicitly save Exif
+
+        # If using MFCC, also save MFCC image for reference
+        orig_mfcc_path = None
+        if use_mfcc:
+            img_orig_mfcc = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': 'mfcc'}, reshape=False)
+            orig_mfcc_path = os.path.join(file_output_dir, "original_mfcc.png")
+            img_orig_mfcc.save(orig_mfcc_path, "PNG", exif=img_orig_mfcc.getexif())
 
         variants = {}
 
@@ -430,6 +448,7 @@ def main():
             'name': base_name,
             'original': os.path.relpath(orig_wav_path, output_dir),
             'original_mel': os.path.relpath(orig_mel_path, output_dir),
+            'original_mfcc': os.path.relpath(orig_mfcc_path, output_dir) if orig_mfcc_path else None,
             'variants': variants
         })
 

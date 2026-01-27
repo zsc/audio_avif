@@ -22,6 +22,7 @@
 - **窗函数**: Hann window
 - **Mel 滤波器**: 80 bands, 频率范围 80Hz - 7600Hz
 - **关键细节**: 使用 **Slaney** 风格的 Mel 刻度和归一化 (Area Normalization)，取 $log_{10}$ 幅度谱 (with floor 1e-10)。
+> 可选：使用 `--mfcc <height>` 以 MFCC 特征进行编码（`height` 为 MFCC 图高度 / n_mfcc）。在 MFCC 模式下，HTML 报告会额外展示 Mel 频谱作为参考。
 
 ### 2.2 图像映射与压缩 (Mel $\to$ Image)
 - **数值映射**: 将 Log-Mel 谱的浮点数值（范围约为 -11.0 到 4.0）线性映射到 0-255 的 8-bit 灰度空间。
@@ -105,6 +106,9 @@ pip install -e .
 
     # 启用 WebP 动图模式 (Pseudo-Video)
     audio-avif input.wav --output results_dir --webp-video
+
+    # 使用 MFCC 特征进行编码 (height 为 MFCC 图高度)
+    audio-avif input.wav --output results_dir --mfcc 60
     ```
 
 2.  **解码模式**:

@@ -90,10 +90,11 @@ def wav_to_mfcc(wav_path, n_mfcc=N_MELS):
     """
     logmel, rms = wav_to_logmel(wav_path)
     # logmel is (T, 80). Transpose to (80, T) for librosa
-    logmel_T = logmel.T
+    # librosa expects log-power mel spectrogram in dB when S is provided.
+    # wav_to_logmel uses log10 of amplitude-like mel, so convert to power-dB.
+    logmel_T = (logmel * 20.0).T
     
     # MFCC (DCT Type-II, Orthogonal normalization)
-    # We treat logmel as log-power spectrum (base 10 vs natural log just scales coefficients)
     mfcc = librosa.feature.mfcc(S=logmel_T, n_mfcc=n_mfcc, dct_type=2, norm='ortho')
     
     return mfcc.T.astype(np.float32), rms
@@ -104,7 +105,10 @@ def mfcc_to_logmel(mfcc, n_mels=N_MELS):
     """
     mfcc_T = mfcc.T
     mel_T = librosa.feature.inverse.mfcc_to_mel(mfcc_T, n_mels=n_mels, dct_type=2, norm='ortho')
-    return mel_T.T
+    mel_T = np.maximum(mel_T, 1e-10)
+    # mfcc_to_mel returns power; convert to log10 amplitude-like mel used elsewhere.
+    logmel_T = 0.5 * np.log10(mel_T)
+    return logmel_T.T.astype(np.float32)
 
 def matrix_to_image(data, min_val=None, max_val=None, metadata=None, reshape=False, stretch=1.0, gaussian_blur=None, horizontal_usm=None, shift_key=0):
     """
