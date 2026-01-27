@@ -86,10 +86,17 @@ def generate_html(output_dir, results):
                         <div class="panel">
                             <h3>Reconstructed (from <span id="lbl-q-${index}">${defaultQ}</span>)</h3>
                             <audio id="audio-recon-${index}" controls src="${sample.variants[defaultQ].wav}" ontimeupdate="updateCursor(${index}, 'recon')"></audio>
+                            <div style="font-size: 12px; color: #555; margin-top: 6px;">Encoded Image</div>
                             <div class="spectrogram-container" id="spec-container-recon-${index}">
                                 <img id="img-recon-${index}" src="${sample.variants[defaultQ].image}" class="spectrogram-img">
                                 <div id="cursor-recon-${index}" class="cursor"></div>
                             </div>
+                            ${sample.variants[defaultQ].recon_mel ? `
+                                <div style="font-size: 12px; color: #555; margin-top: 10px;">Reconstructed Mel</div>
+                                <div class="spectrogram-container">
+                                    <img id="img-recon-mel-${index}" src="${sample.variants[defaultQ].recon_mel}" class="spectrogram-img">
+                                </div>
+                            ` : ''}
                             <div id="info-${index}" style="margin-top: 10px; font-family: monospace; background: #eee; padding: 10px; border-radius: 4px;">
                                 <!-- Sizes and Ratio will be injected here -->
                             </div>
@@ -116,6 +123,10 @@ def generate_html(output_dir, results):
             document.getElementById(`lbl-q-${index}`).innerText = q;
             document.getElementById(`audio-recon-${index}`).src = variant.wav;
             document.getElementById(`img-recon-${index}`).src = variant.image;
+            const reconMelImg = document.getElementById(`img-recon-mel-${index}`);
+            if (reconMelImg && variant.recon_mel) {
+                reconMelImg.src = variant.recon_mel;
+            }
             
             // Update Info
             const wavKB = (variant.wav_size / 1024).toFixed(2);
@@ -384,6 +395,15 @@ def main():
             # Save Wav
             wav_recon_path = os.path.join(file_output_dir, f"q{q}{shift_suffix}_recon.wav")
             sf.write(wav_recon_path, wav_recon, audio_avif.TARGET_SR)
+
+            # Save reconstructed Mel image for display (MFCC mode)
+            recon_mel_path = None
+            if use_mfcc or meta_recon.get('type') == 'mfcc':
+                img_recon_mel = audio_avif.matrix_to_image(
+                    logmel_recon, metadata={'rms': rms_recon, 'type': 'mel'}, reshape=False
+                )
+                recon_mel_path = os.path.join(file_output_dir, f"q{q}{shift_suffix}_recon_mel.png")
+                img_recon_mel.save(recon_mel_path, "PNG", exif=img_recon_mel.getexif())
             
             # Use distinct keys
             if all(s == 0 for s in shift_keys):
@@ -393,6 +413,7 @@ def main():
 
             variants[key] = {
                 'image': os.path.relpath(img_path, output_dir),
+                'recon_mel': os.path.relpath(recon_mel_path, output_dir) if recon_mel_path else None,
                 'wav': os.path.relpath(wav_recon_path, output_dir),
                 'wav_size': orig_wav_size,
                 'image_size': compressed_img_size
