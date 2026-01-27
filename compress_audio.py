@@ -150,14 +150,22 @@ def generate_html(output_dir, results):
     with open(os.path.join(output_dir, 'index.html'), 'w') as f:
         f.write(final_html)
 
-def decode_file(input_img, output_wav, device, vocoder):
+def decode_file(input_img, output_wav, device, vocoder, is_mfcc=False):
     print(f"Decoding {input_img} -> {output_wav}...")
     try:
         if input_img.lower().endswith('.webp'):
             logmel, rms = audio_avif.webp_anim_to_logmel(input_img)
         else:
             img = Image.open(input_img)
-            logmel, rms = audio_avif.image_to_logmel(img)
+            data, meta = audio_avif.image_to_matrix(img)
+            rms = meta.get('rms')
+            
+            # Check metadata for type
+            if meta.get('type') == 'mfcc' or is_mfcc:
+                print("  Interpreting as MFCC...")
+                logmel = audio_avif.mfcc_to_logmel(data)
+            else:
+                logmel = data
             
         wav = audio_avif.reconstruct_wav(logmel, vocoder, device)
         
@@ -169,6 +177,8 @@ def decode_file(input_img, output_wav, device, vocoder):
         print(f"Success. Saved to {output_wav}")
     except Exception as e:
         print(f"Error decoding {input_img}: {e}")
+        import traceback
+        traceback.print_exc()
 
 def main():
     parser = argparse.ArgumentParser(description="Compress/Decompress audio via Mel-Spectrogram image (AVIF or JPEG).")
@@ -176,6 +186,7 @@ def main():
     parser.add_argument("--output", default=None, help="Output directory (for batch/demo) or filename (for single file). Defaults to 'output' for batch.")
     parser.add_argument("--jpg", action="store_true", help="Use JPEG instead of AVIF for compression.")
     parser.add_argument("--png", action="store_true", help="Use PNG (Lossless) instead of AVIF.")
+    parser.add_argument("--mfcc", action="store_true", help="Use MFCC features instead of Mel-Spectrogram.")
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
     parser.add_argument("--stretch", type=float, default=1.0, help="Horizontal stretch factor (e.g. 2.0 for 2x width, 0.5 for 0.5x width).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
@@ -232,7 +243,7 @@ def main():
              os.makedirs(output_path, exist_ok=True)
              output_path = os.path.join(output_path, os.path.splitext(os.path.basename(args.input))[0] + ".wav")
              
-        decode_file(args.input, output_path, device, vocoder)
+        decode_file(args.input, output_path, device, vocoder, is_mfcc=args.mfcc)
         return
 
     # --- ENCODE/DEMO MODE (Existing Logic) ---
@@ -273,6 +284,7 @@ def main():
 
     use_square = args.sq
     use_webp = args.webp_video
+    use_mfcc = args.mfcc
 
     for wav_file in files:
         print(f"Processing {wav_file}...")
@@ -280,9 +292,16 @@ def main():
         file_output_dir = os.path.join(output_dir, base_name)
         os.makedirs(file_output_dir, exist_ok=True)
         
-        # 1. Original -> Mel
+        # 1. Original -> Data
         try:
-            logmel, rms = audio_avif.wav_to_logmel(wav_file) # (T, 80)
+            if use_mfcc:
+                # Use MFCC
+                data_orig, rms = audio_avif.wav_to_mfcc(wav_file)
+                data_type = 'mfcc'
+            else:
+                # Use LogMel
+                data_orig, rms = audio_avif.wav_to_logmel(wav_file) # (T, 80)
+                data_type = 'mel'
         except Exception as e:
             print(f"Error reading {wav_file}: {e}")
             continue
@@ -293,8 +312,9 @@ def main():
         sf.write(orig_wav_path, wav_orig, audio_avif.TARGET_SR)
         orig_wav_size = os.path.getsize(orig_wav_path)
         
-        # Save Original Mel as PNG (Lossless) - ALWAYS Linear (reshape=False) for visualization
-        img_orig = audio_avif.logmel_to_image(logmel, rms=rms, reshape=False) # Embed RMS
+        # Save Original Data as PNG (Lossless) - ALWAYS Linear (reshape=False) for visualization
+        # We pass explicit metadata for consistency
+        img_orig = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': data_type}, reshape=False)
         orig_mel_path = os.path.join(file_output_dir, "original_mel.png")
         img_orig.save(orig_mel_path, "PNG", exif=img_orig.getexif()) # Explicitly save Exif
 
@@ -302,8 +322,9 @@ def main():
 
         # Standard AVIF/JPEG/PNG Loop
         for q in qualities:
-            # Mel -> Image (Sequential Shifts)
-            img = audio_avif.logmel_to_image(logmel, rms=rms, reshape=use_square, stretch=args.stretch, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
+            # Data -> Image (Sequential Shifts)
+            # We must pass the SAME metadata to ensure decoding works (min/max are computed inside if not passed, which is fine)
+            img = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': data_type}, reshape=use_square, stretch=args.stretch, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
             
             # Save Compressed Image
             # Suffix shows all shifts if any
@@ -326,10 +347,16 @@ def main():
             # Load Compressed Image
             img_loaded = Image.open(img_path)
             
-            # Image -> Mel
-            logmel_recon, rms_recon = audio_avif.image_to_logmel(img_loaded)
+            # Image -> Data
+            data_recon, meta_recon = audio_avif.image_to_matrix(img_loaded)
+            rms_recon = meta_recon.get('rms')
             
-            # Mel -> Wav
+            # Data -> Wav
+            if use_mfcc or meta_recon.get('type') == 'mfcc':
+                logmel_recon = audio_avif.mfcc_to_logmel(data_recon)
+            else:
+                logmel_recon = data_recon
+            
             wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
             
             # Restore Loudness
@@ -354,41 +381,50 @@ def main():
             }
             print(f"  {key}: Saved and Reconstructed.")
 
-        # Optional WebP Loop
+        # Optional WebP Loop (Experimental - Keeping as Mel for now unless I update it properly, but user might assume it follows --mfcc)
+        # For safety, I will skip WebP if use_mfcc is True to avoid confusion or errors, or default to Mel.
+        # But 'logmel_to_webp_anim' uses 'logmel'. If I pass MFCC data to it, it might work but 'webp_anim_to_logmel' will assume it returns logmel.
+        # I'll disable WebP for MFCC for now or warning.
         if use_webp:
-            for q in audio_avif.QUALITIES:
-                if all(s == 0 for s in shift_keys):
-                    shift_suffix = ""
-                else:
-                    shift_suffix = "_s" + "_".join(map(str, shift_keys))
+            if use_mfcc:
+                print("Warning: WebP Video experiment currently supports Mel-spectrogram only. Skipping.")
+            else:
+                # Existing WebP logic... (Keep as is in original file, I'm replacing the block above so I need to be careful not to delete this if I replace huge chunk)
+                # Wait, I am replacing the *entire* file logic or just parts?
+                # I am replacing `decode_file` and `main`. So I need to include the WebP loop in `main` if I replace the whole `main`.
+                for q in audio_avif.QUALITIES:
+                    if all(s == 0 for s in shift_keys):
+                        shift_suffix = ""
+                    else:
+                        shift_suffix = "_s" + "_".join(map(str, shift_keys))
 
-                webp_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}.webp")
-                
-                # Encode (Sequential Shifts)
-                audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
-                compressed_img_size = os.path.getsize(webp_path)
-                
-                # Decode
-                logmel_recon, rms_recon = audio_avif.webp_anim_to_logmel(webp_path)
-                wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
-                if rms_recon:
-                    wav_recon = audio_avif.apply_loudness(wav_recon, rms_recon)
+                    webp_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}.webp")
                     
-                wav_recon_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}_recon.wav")
-                sf.write(wav_recon_path, wav_recon, audio_avif.TARGET_SR)
-                
-                if all(s == 0 for s in shift_keys):
-                    key = f"WebP-Video Q{q}"
-                else:
-                    key = f"Shifted({','.join(map(str, shift_keys))}) WebP-Video Q{q}"
+                    # Encode (Sequential Shifts)
+                    audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
+                    compressed_img_size = os.path.getsize(webp_path)
+                    
+                    # Decode
+                    logmel_recon, rms_recon = audio_avif.webp_anim_to_logmel(webp_path)
+                    wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
+                    if rms_recon:
+                        wav_recon = audio_avif.apply_loudness(wav_recon, rms_recon)
+                        
+                    wav_recon_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}_recon.wav")
+                    sf.write(wav_recon_path, wav_recon, audio_avif.TARGET_SR)
+                    
+                    if all(s == 0 for s in shift_keys):
+                        key = f"WebP-Video Q{q}"
+                    else:
+                        key = f"Shifted({','.join(map(str, shift_keys))}) WebP-Video Q{q}"
 
-                variants[key] = {
-                    'image': os.path.relpath(webp_path, output_dir),
-                    'wav': os.path.relpath(wav_recon_path, output_dir),
-                    'wav_size': orig_wav_size,
-                    'image_size': compressed_img_size
-                }
-                print(f"  {key}: Saved and Reconstructed.")
+                    variants[key] = {
+                        'image': os.path.relpath(webp_path, output_dir),
+                        'wav': os.path.relpath(wav_recon_path, output_dir),
+                        'wav_size': orig_wav_size,
+                        'image_size': compressed_img_size
+                    }
+                    print(f"  {key}: Saved and Reconstructed.")
 
         results.append({
             'name': base_name,

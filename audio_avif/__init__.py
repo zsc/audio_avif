@@ -84,30 +84,62 @@ def wav_to_logmel(wav_path):
 
     return logmel.T.astype(np.float32), float(rms) # Return (T, 80), rms
 
-def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0, gaussian_blur=None, horizontal_usm=None, shift_key=0):
+def wav_to_mfcc(wav_path, n_mfcc=N_MELS):
     """
-    Converts (T, 80) float logmel to PIL Image (Grayscale).
+    Reads wav, returns ((T, n_mfcc) mfcc coefficients, rms).
+    """
+    logmel, rms = wav_to_logmel(wav_path)
+    # logmel is (T, 80). Transpose to (80, T) for librosa
+    logmel_T = logmel.T
     
-    Args:
-        reshape (bool): If True, reshapes long spectrograms into a roughly square image
-                        by stacking time slices vertically. This often improves compression.
-        stretch (float): Horizontal stretch factor. 2.0 means 2x width, 0.5 means 0.5x width.
-        gaussian_blur (tuple): (kernel_size, sigma) for 1D horizontal Gaussian blur.
-        horizontal_usm (tuple): (kernel_size, sigma, strength) for 1D horizontal unsharp mask.
-        shift_key (int): Vertical shift in pixels. Positive = Up (Higher Pitch), Negative = Down.
+    # MFCC (DCT Type-II, Orthogonal normalization)
+    # We treat logmel as log-power spectrum (base 10 vs natural log just scales coefficients)
+    mfcc = librosa.feature.mfcc(S=logmel_T, n_mfcc=n_mfcc, dct_type=2, norm='ortho')
+    
+    return mfcc.T.astype(np.float32), rms
+
+def mfcc_to_logmel(mfcc, n_mels=N_MELS):
     """
+    Converts (T, n_mfcc) MFCC back to (T, n_mels) Log-Mel spectrogram.
+    """
+    mfcc_T = mfcc.T
+    mel_T = librosa.feature.inverse.mfcc_to_mel(mfcc_T, n_mels=n_mels, dct_type=2, norm='ortho')
+    return mel_T.T
+
+def matrix_to_image(data, min_val=None, max_val=None, metadata=None, reshape=False, stretch=1.0, gaussian_blur=None, horizontal_usm=None, shift_key=0):
+    """
+    Generic function to convert a 2D matrix (T, H) to a PIL Image.
+    """
+    if min_val is None:
+        min_val = data.min()
+    if max_val is None:
+        max_val = data.max()
+    
+    if metadata is None:
+        metadata = {}
+        
+    # Store essential reconstruction info
+    metadata['min_val'] = float(min_val)
+    metadata['max_val'] = float(max_val)
+    metadata['height'] = data.shape[1]
+
     # Normalize to 0-1
-    norm = (logmel - min_val) / (max_val - min_val)
+    # Avoid division by zero
+    rng = max_val - min_val
+    if rng == 0:
+        rng = 1.0
+        
+    norm = (data - min_val) / rng
     norm = np.clip(norm, 0.0, 1.0)
     
     # Scale to 0-255
     uint8_data = (norm * 255.0).astype(np.uint8)
     
-    # Standard spectrogram orientation: Frequency is Y-axis (height), Time is X-axis (width)
-    # logmel is (Time, Freq) -> (T, 80)
-    # We transpose to (Freq, Time) -> (80, T)
-    # And flipud so low freq is at bottom
-    img_data = np.flipud(uint8_data.T) # (80, T)
+    # Orientation: Data is (T, H). Image expects (H, T).
+    # Flipud so index 0 (low freq/coeff) is at bottom.
+    img_data = np.flipud(uint8_data.T) # (H, T)
+    
+    H_img, T_img = img_data.shape
 
     # Apply shifts sequentially
     s_keys = [shift_key] if isinstance(shift_key, int) else shift_key
@@ -119,21 +151,19 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         shifted = np.full_like(img_data, int(noise_floor))
         
         if sk > 0:
-            # Shift Up: Content moves up. Bottom filled with noise.
-            if sk < 80:
+            # Shift Up
+            if sk < H_img:
                 shifted[:-sk, :] = img_data[sk:, :]
         else:
-            # Shift Down: Content moves down. Top filled with noise.
+            # Shift Down
             neg_sk = -sk
-            if neg_sk < 80:
+            if neg_sk < H_img:
                 shifted[neg_sk:, :] = img_data[:-neg_sk, :]
         img_data = shifted
     
     if gaussian_blur is not None:
         kernel_size, sigma = gaussian_blur
         if sigma > 0:
-            # radius = (kernel_size - 1) / 2
-            # truncate = radius / sigma
             truncate = ((kernel_size - 1) / 2.0) / sigma
             img_data = gaussian_filter1d(img_data.astype(np.float32), sigma=sigma, axis=1, truncate=truncate)
             img_data = np.clip(img_data, 0, 255).astype(np.uint8)
@@ -148,28 +178,23 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
             img_data = np.clip(img_data, 0, 255).astype(np.uint8)
 
     original_width = img_data.shape[1]
-    metadata = {}
     
-    if rms is not None:
-        metadata['rms'] = rms
-
     if stretch != 1.0:
         new_w = int(round(original_width * stretch))
         # Use PIL for resizing
         img_temp = Image.fromarray(img_data)
-        img_temp = img_temp.resize((new_w, 80), resample=Image.Resampling.BILINEAR)
+        img_temp = img_temp.resize((new_w, H_img), resample=Image.Resampling.BILINEAR)
         img_data = np.array(img_temp)
-        
-        # Metadata for restoration is NOT saved, allowing time-stretching effect.
-
+    
     current_width = img_data.shape[1]
 
     if reshape:
         # Square heuristic
         T = current_width
-        # Target roughly square: Side ~ sqrt(80 * T)
-        # Number of strips k = Side / 80 = sqrt(T/80)
-        k = max(1, int(round(math.sqrt(T / 80.0))))
+        # Target roughly square: Side ~ sqrt(H * T)
+        # Number of strips k = Side / H = sqrt(T/H)
+        val = T / float(H_img)
+        k = max(1, int(round(math.sqrt(val))))
         
         # Calculate width per strip
         width_per_strip = math.ceil(T / k)
@@ -182,28 +207,32 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
         pad_amount = total_width_needed - T
         
         if pad_amount > 0:
-            # Pad with 0 (silence equivalent in normalized space)
-            padding = np.zeros((80, pad_amount), dtype=np.uint8)
+            padding = np.zeros((H_img, pad_amount), dtype=np.uint8)
             img_data = np.hstack([img_data, padding])
             
         # Split and Stack Vertically
-        # Each chunk is (80, width_per_strip)
         chunks = [img_data[:, i*width_per_strip : (i+1)*width_per_strip] for i in range(k)]
-        img_data = np.vstack(chunks) # (80*k, width_per_strip)
+        img_data = np.vstack(chunks) # (H*k, width_per_strip)
         
         metadata['orig_w'] = current_width
 
     img = Image.fromarray(img_data)
     
-    if metadata:
-        exif = img.getexif()
-        # Tag 270 is ImageDescription
-        exif[270] = json.dumps(metadata)
-        # Note: The caller must use img.save(..., exif=img.getexif())
-        # We attach it to the image instance for convenience if supported
-        pass
-        
+    exif = img.getexif()
+    exif[270] = json.dumps(metadata)
+    # Caller must save with exif=img.getexif()
+    
     return img
+
+def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=False, stretch=1.0, gaussian_blur=None, horizontal_usm=None, shift_key=0):
+    """
+    Wrapper for backward compatibility.
+    """
+    metadata = {}
+    if rms is not None:
+        metadata['rms'] = rms
+        
+    return matrix_to_image(logmel, min_val, max_val, metadata, reshape, stretch, gaussian_blur, horizontal_usm, shift_key)
 
 def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, gaussian_blur=None, horizontal_usm=None, shift_key=0):
     """
@@ -350,15 +379,17 @@ def webp_anim_to_logmel(image_path, min_val=MIN_DB, max_val=MAX_DB):
     
     return logmel, rms
 
-def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
+def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
     """
-    Converts PIL Image to (T, 80) logmel.
-    Handles un-reshaping if metadata indicates the image was squared.
-    Returns (logmel, rms). rms is None if not found in metadata.
+    Generic function to convert PIL Image to (T, H) data matrix.
+    Reads metadata for reconstruction parameters.
     """
     # Parse Metadata
     rms = None
     orig_w = None
+    min_val = default_min
+    max_val = default_max
+    height = None
     
     exif = image.getexif()
     if exif and 270 in exif:
@@ -369,8 +400,13 @@ def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
             if isinstance(meta, dict):
                 rms = meta.get('rms')
                 orig_w = meta.get('orig_w')
+                if 'min_val' in meta:
+                    min_val = meta['min_val']
+                if 'max_val' in meta:
+                    max_val = meta['max_val']
+                height = meta.get('height')
         except json.JSONDecodeError:
-            # Fallback to legacy format "OriginalRMS:0.123"
+            # Fallback to legacy
             if isinstance(desc, str) and desc.startswith("OriginalRMS:"):
                 try:
                     rms = float(desc.split(":")[1])
@@ -378,35 +414,47 @@ def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
                     pass
 
     image = image.convert('L')
-    img_data = np.array(image) # (H, W)
+    img_data = np.array(image) # (H_img, W_img)
+    H_img, W_img = img_data.shape
     
+    # Try to infer height if not in metadata
+    if height is None:
+        # Assume 80 for legacy files
+        height = 80
+        
     # Un-reshape if needed
     if orig_w is not None:
-        H, W = img_data.shape
-        # We know each strip is 80 pixels high
-        if H % 80 == 0:
-            k = H // 80
+        # We know each strip is 'height' pixels high
+        if H_img % height == 0:
+            k = H_img // height
             # Split vertically
             chunks = np.vsplit(img_data, k)
             # Stack horizontally
-            img_data = np.hstack(chunks) # (80, k*W)
+            img_data = np.hstack(chunks) # (height, k*W_strip)
             # Crop padding
             img_data = img_data[:, :orig_w]
         else:
-            print(f"Warning: Image height {H} is not a multiple of 80, cannot un-reshape correctly. Treating as standard.")
+            print(f"Warning: Image height {H_img} is not a multiple of {height}, cannot un-reshape correctly. Treating as standard.")
 
     img_data = img_data.astype(np.float32)
     
     # Flip back (Spectrogram was flipud)
     img_data = np.flipud(img_data)
     
-    # Transpose back: (80, T) -> (T, 80)
-    logmel_norm = img_data.T / 255.0
+    # Transpose back: (H, T) -> (T, H)
+    norm_data = img_data.T / 255.0
     
     # De-normalize
-    logmel = logmel_norm * (max_val - min_val) + min_val
+    data = norm_data * (max_val - min_val) + min_val
     
-    return logmel, rms
+    return data, {'rms': rms, 'min_val': min_val, 'max_val': max_val, 'height': height}
+
+def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
+    """
+    Wrapper for backward compatibility. Returns (logmel, rms).
+    """
+    data, metadata = image_to_matrix(image, min_val, max_val)
+    return data, metadata.get('rms')
 
 def reconstruct_wav(logmel, vocoder, device):
     """
