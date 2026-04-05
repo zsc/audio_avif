@@ -47,9 +47,9 @@ def load_vocoder(device=None):
     vocoder.eval()
     return vocoder
 
-def wav_to_logmel(wav_path):
+def wav_to_logmel(wav_path, n_mels=N_MELS):
     """
-    Reads wav, returns ((T, 80) log10-mel spectrogram, rms).
+    Reads wav, returns ((T, n_mels) log10-mel spectrogram, rms).
     rms is calculated on the 16kHz audio used for mel extraction.
     """
     wav, sr = sf.read(wav_path)
@@ -81,7 +81,7 @@ def wav_to_logmel(wav_path):
     mel_basis = librosa.filters.mel(
         sr=sr,
         n_fft=N_FFT,
-        n_mels=N_MELS,
+        n_mels=n_mels,
         fmin=FMIN,
         fmax=FMAX,
         htk=False,         # Slaney
@@ -90,16 +90,16 @@ def wav_to_logmel(wav_path):
 
     mel = np.einsum("mf,ft->mt", mel_basis, S, optimize=True)
     mel = np.maximum(mel, 1e-10)
-    logmel = np.log10(mel) # (80, T)
+    logmel = np.log10(mel) # (n_mels, T)
 
-    return logmel.T.astype(np.float32), float(rms) # Return (T, 80), rms
+    return logmel.T.astype(np.float32), float(rms) # Return (T, n_mels), rms
 
-def wav_to_mfcc(wav_path, n_mfcc=N_MELS):
+def wav_to_mfcc(wav_path, n_mfcc=N_MELS, n_mels=N_MELS):
     """
     Reads wav, returns ((T, n_mfcc) mfcc coefficients, rms).
     """
-    logmel, rms = wav_to_logmel(wav_path)
-    # logmel is (T, 80). Transpose to (80, T) for librosa
+    logmel, rms = wav_to_logmel(wav_path, n_mels=n_mels)
+    # logmel is (T, n_mels). Transpose to (n_mels, T) for librosa
     # librosa expects log-power mel spectrogram in dB when S is provided.
     # wav_to_logmel uses log10 of amplitude-like mel, so convert to power-dB.
     logmel_T = (logmel * 20.0).T
@@ -245,13 +245,15 @@ def logmel_to_image(logmel, min_val=MIN_DB, max_val=MAX_DB, rms=None, reshape=Fa
     metadata = {}
     if rms is not None:
         metadata['rms'] = rms
+    metadata['type'] = 'mel'
+    metadata['mel_bins'] = int(logmel.shape[1])
         
     return matrix_to_image(logmel, min_val, max_val, metadata, reshape, stretch, gaussian_blur, horizontal_usm, shift_key)
 
 def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, gaussian_blur=None, horizontal_usm=None, shift_key=0):
     """
     Saves logmel as an animated WebP (pseudo-video).
-    logmel: (T, 80) float
+    logmel: (T, n_mels) float
     """
     # 1. Normalize and quantize
     min_val, max_val = MIN_DB, MAX_DB
@@ -259,8 +261,9 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
     norm = np.clip(norm, 0.0, 1.0)
     uint8_data = (norm * 255.0).astype(np.uint8)
     
-    # Orientation: (80, T)
-    img_data = np.flipud(uint8_data.T) # (80, T)
+    # Orientation: (n_mels, T)
+    img_data = np.flipud(uint8_data.T) # (n_mels, T)
+    H, T = img_data.shape
 
     s_keys = [shift_key] if isinstance(shift_key, int) else shift_key
     for sk in s_keys:
@@ -269,11 +272,11 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
         noise_floor = np.percentile(img_data, 5)
         shifted = np.full_like(img_data, int(noise_floor))
         if sk > 0:
-            if sk < 80:
+            if sk < H:
                 shifted[:-sk, :] = img_data[sk:, :]
         else:
             neg_sk = -sk
-            if neg_sk < 80:
+            if neg_sk < H:
                 shifted[neg_sk:, :] = img_data[:-neg_sk, :]
         img_data = shifted
 
@@ -293,13 +296,11 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
             img_data = img_data_f + (img_data_f - blurred) * strength
             img_data = np.clip(img_data, 0, 255).astype(np.uint8)
 
-    H, T = img_data.shape
-    
     # 2. Chunking
     frames = []
     
     # Ensure all chunks are same size by padding the last one if needed
-    # WebP/Video often prefers even dimensions. 80 is even. chunk_width should be even.
+    # WebP/Video often prefers even dimensions. chunk_width should be even.
     num_chunks = math.ceil(T / chunk_width)
     
     for i in range(num_chunks):
@@ -316,7 +317,14 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
         frames.append(Image.fromarray(chunk))
         
     # 3. Metadata
-    metadata = {'rms': rms, 'orig_w': T, 'chunk_w': chunk_width}
+    metadata = {
+        'rms': rms,
+        'orig_w': T,
+        'chunk_w': chunk_width,
+        'height': H,
+        'mel_bins': H,
+        'type': 'mel',
+    }
     exif_bytes = None
     
     # Create a dummy image to generate EXIF bytes
@@ -344,7 +352,7 @@ def logmel_to_webp_anim(logmel, rms, output_path, quality=80, chunk_width=64, ga
 
 def webp_anim_to_logmel(image_path, min_val=MIN_DB, max_val=MAX_DB):
     """
-    Reads animated WebP, reconstructs logmel (T, 80).
+    Reads animated WebP, reconstructs logmel (T, n_mels).
     """
     img = Image.open(image_path)
     
@@ -387,7 +395,7 @@ def webp_anim_to_logmel(image_path, min_val=MIN_DB, max_val=MAX_DB):
     # Flip back
     full_img = np.flipud(full_img)
     
-    # Transpose (80, T) -> (T, 80)
+    # Transpose (H, T) -> (T, H)
     logmel_norm = full_img.astype(np.float32).T / 255.0
     logmel = logmel_norm * (max_val - min_val) + min_val
     
@@ -405,6 +413,7 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
     max_val = default_max
     height = None
     data_type = None
+    mel_bins = None
     
     exif = image.getexif()
     if exif and 270 in exif:
@@ -421,6 +430,7 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
                     max_val = meta['max_val']
                 height = meta.get('height')
                 data_type = meta.get('type')
+                mel_bins = meta.get('mel_bins')
         except json.JSONDecodeError:
             # Fallback to legacy
             if isinstance(desc, str) and desc.startswith("OriginalRMS:"):
@@ -469,6 +479,7 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
         'max_val': max_val,
         'height': height,
         'type': data_type,
+        'mel_bins': mel_bins if mel_bins is not None else height,
     }
 
 def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
@@ -484,6 +495,12 @@ def reconstruct_wav_with_vocoder(logmel, vocoder, device):
     """
     import torch
 
+    if logmel.shape[-1] != N_MELS:
+        raise ValueError(
+            f"SpeechT5 vocoder expects {N_MELS} mel bins, got {logmel.shape[-1]}. "
+            "Use --decoder griffin-lim for non-80-bin log-mel."
+        )
+
     spectrogram = torch.tensor(logmel).unsqueeze(0).to(device)
     
     with torch.no_grad():
@@ -493,7 +510,7 @@ def reconstruct_wav_with_vocoder(logmel, vocoder, device):
 
 def reconstruct_wav_with_griffin_lim(logmel, griffin_lim_iters=DEFAULT_GRIFFIN_LIM_ITERS):
     """
-    Reconstructs waveform from SpeechT5-style log-mel without a neural vocoder.
+    Reconstructs waveform from log-mel without a neural vocoder.
     """
     mel = np.power(10.0, np.asarray(logmel, dtype=np.float64).T).astype(np.float64, copy=False)
     with warnings.catch_warnings():

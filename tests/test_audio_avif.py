@@ -132,6 +132,33 @@ class TestAudioAvif(unittest.TestCase):
         self.assertTrue(np.any(np.abs(peaks - 440.0) < 35.0), "Should retain a peak near 440 Hz")
         self.assertTrue(np.any(np.abs(peaks - 880.0) < 45.0), "Should retain a peak near 880 Hz")
 
+    def test_griffin_lim_reconstruction_cycle_mel_128(self):
+        mel_bins = 128
+        logmel, rms_orig = audio_avif.wav_to_logmel(self.wav_path, n_mels=mel_bins)
+        self.assertEqual(logmel.shape[1], mel_bins)
+
+        img = audio_avif.logmel_to_image(logmel, rms=rms_orig)
+        data_recon, meta_recon = audio_avif.image_to_matrix(img)
+
+        self.assertEqual(data_recon.shape, logmel.shape)
+        self.assertEqual(meta_recon.get("mel_bins"), mel_bins)
+        self.assertEqual(meta_recon.get("height"), mel_bins)
+
+        wav_recon = audio_avif.reconstruct_wav(
+            data_recon,
+            decoder="griffin-lim",
+            griffin_lim_iters=12,
+        )
+        wav_recon_aligned = audio_avif.apply_loudness(wav_recon, meta_recon.get("rms"))
+
+        self.assertTrue(np.isfinite(wav_recon_aligned).all(), "Waveform should not contain NaN/Inf")
+        self.assertGreater(len(wav_recon_aligned), 0, "Waveform should not be empty")
+        self.assertGreater(np.sqrt(np.mean(wav_recon_aligned**2)), 1e-3, "Waveform should contain audible energy")
+
+        peaks = self.estimate_peak_frequencies(wav_recon_aligned, audio_avif.TARGET_SR)
+        self.assertTrue(np.any(np.abs(peaks - 440.0) < 35.0), "Should retain a peak near 440 Hz")
+        self.assertTrue(np.any(np.abs(peaks - 880.0) < 60.0), "Should retain a peak near 880 Hz")
+
     def test_reshape_logic(self):
         # Generate longer audio (5s) to trigger reshaping
         sr = 16000
@@ -175,6 +202,28 @@ class TestAudioAvif(unittest.TestCase):
         logmel_recon_lin, _ = audio_avif.image_to_logmel(img_linear)
         self.assertEqual(logmel_recon_lin.shape, logmel.shape)
         
+        os.remove(long_wav_path)
+
+    def test_reshape_logic_mel_128(self):
+        sr = 16000
+        duration = 3.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        audio = 0.5 * np.sin(2 * np.pi * 440 * t)
+
+        long_wav_path = os.path.join(self.test_dir, "long_tone_128.wav")
+        sf.write(long_wav_path, audio, sr)
+
+        mel_bins = 128
+        logmel, rms_orig = audio_avif.wav_to_logmel(long_wav_path, n_mels=mel_bins)
+
+        img_reshaped = audio_avif.logmel_to_image(logmel, rms=rms_orig, reshape=True)
+        _, h = img_reshaped.size
+        self.assertEqual(h % mel_bins, 0, "Height should be multiple of mel_bins")
+        self.assertTrue(h >= mel_bins, "Reshaped image height should be at least one mel block")
+
+        logmel_recon, _ = audio_avif.image_to_logmel(img_reshaped)
+        self.assertEqual(logmel_recon.shape, logmel.shape, "Reconstructed shape must match original")
+
         os.remove(long_wav_path)
 
 if __name__ == '__main__':

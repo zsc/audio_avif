@@ -5,13 +5,16 @@ import librosa
 from PIL import Image
 import audio_avif
 
-def get_decoder_description(decoder, griffin_lim_iters):
+def get_decoder_description(decoder, griffin_lim_iters, mel_bins):
     if decoder == "griffin-lim":
         return (
             f"Using librosa mel inversion + Griffin-Lim "
-            f"({griffin_lim_iters} iterations) for waveform reconstruction."
+            f"({griffin_lim_iters} iterations) for waveform reconstruction "
+            f"with {mel_bins}-bin log-mel."
         )
-    return "Using microsoft/speecht5_hifigan for vocoding."
+    return (
+        f"Using microsoft/speecht5_hifigan for vocoding with {mel_bins}-bin log-mel."
+    )
 
 def generate_html(output_dir, results, decoder_description):
     """
@@ -182,6 +185,7 @@ def decode_file(
     output_wav,
     decoder,
     griffin_lim_iters,
+    mel_bins,
     device=None,
     vocoder=None,
     is_mfcc=False,
@@ -198,7 +202,8 @@ def decode_file(
             # Check metadata for type
             if meta.get('type') == 'mfcc' or is_mfcc:
                 print("  Interpreting as MFCC...")
-                logmel = audio_avif.mfcc_to_logmel(data)
+                target_mel_bins = meta.get('mel_bins') or mel_bins
+                logmel = audio_avif.mfcc_to_logmel(data, n_mels=target_mel_bins)
             else:
                 logmel = data
             
@@ -229,6 +234,12 @@ def main():
     parser.add_argument("--png", action="store_true", help="Use PNG (Lossless) instead of AVIF.")
     parser.add_argument("--mfcc", type=int, default=None, metavar="HEIGHT",
                         help="Use MFCC features with given height (n_mfcc) instead of Mel-Spectrogram.")
+    parser.add_argument(
+        "--mel-bins",
+        type=int,
+        default=audio_avif.N_MELS,
+        help="Number of mel bins for mel extraction/reconstruction. SpeechT5 vocoder currently requires 80; Griffin-Lim supports other values such as 128.",
+    )
     parser.add_argument("--sq", action="store_true", help="Enable square-reshaping heuristic. Default is linear (long strip).")
     parser.add_argument("--stretch", type=float, default=1.0, help="Horizontal stretch factor (e.g. 2.0 for 2x width, 0.5 for 0.5x width).")
     parser.add_argument("--webp-video", action="store_true", help="Enable WebP animation (pseudo-video) compression experiment.")
@@ -248,6 +259,9 @@ def main():
         help="Number of Griffin-Lim iterations when --decoder=griffin-lim.",
     )
     args = parser.parse_args()
+
+    if args.mel_bins <= 0:
+        parser.error("--mel-bins must be a positive integer.")
 
     # Parse Shift Keys
     try:
@@ -287,6 +301,10 @@ def main():
     device = None
     vocoder = None
     if args.decoder == "vocoder":
+        if args.mel_bins != audio_avif.N_MELS:
+            parser.error(
+                f"--decoder=vocoder currently requires --mel-bins={audio_avif.N_MELS}."
+            )
         device = audio_avif.get_device()
         print(f"Loading SpeechT5HifiGan on {device}...")
         vocoder = audio_avif.load_vocoder(device)
@@ -313,6 +331,7 @@ def main():
             output_path,
             decoder=args.decoder,
             griffin_lim_iters=args.griffin_lim_iters,
+            mel_bins=args.mel_bins,
             device=device,
             vocoder=vocoder,
             is_mfcc=args.mfcc is not None,
@@ -370,12 +389,22 @@ def main():
         try:
             if use_mfcc:
                 # Use MFCC for encoding, but keep Mel for display
-                data_orig, rms = audio_avif.wav_to_mfcc(wav_file, n_mfcc=mfcc_height)
+                data_orig, rms = audio_avif.wav_to_mfcc(
+                    wav_file,
+                    n_mfcc=mfcc_height,
+                    n_mels=args.mel_bins,
+                )
                 data_type = 'mfcc'
-                logmel_display, _ = audio_avif.wav_to_logmel(wav_file)  # (T, 80)
+                logmel_display, _ = audio_avif.wav_to_logmel(
+                    wav_file,
+                    n_mels=args.mel_bins,
+                )
             else:
                 # Use LogMel
-                data_orig, rms = audio_avif.wav_to_logmel(wav_file) # (T, 80)
+                data_orig, rms = audio_avif.wav_to_logmel(
+                    wav_file,
+                    n_mels=args.mel_bins,
+                )
                 data_type = 'mel'
                 logmel_display = data_orig
         except Exception as e:
@@ -390,14 +419,22 @@ def main():
         
         # Save Original Mel as PNG (Lossless) - ALWAYS Linear (reshape=False) for visualization
         # We pass explicit metadata for consistency
-        img_orig_mel = audio_avif.matrix_to_image(logmel_display, metadata={'rms': rms, 'type': 'mel'}, reshape=False)
+        img_orig_mel = audio_avif.matrix_to_image(
+            logmel_display,
+            metadata={'rms': rms, 'type': 'mel', 'mel_bins': args.mel_bins},
+            reshape=False,
+        )
         orig_mel_path = os.path.join(file_output_dir, "original_mel.png")
         img_orig_mel.save(orig_mel_path, "PNG", exif=img_orig_mel.getexif()) # Explicitly save Exif
 
         # If using MFCC, also save MFCC image for reference
         orig_mfcc_path = None
         if use_mfcc:
-            img_orig_mfcc = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': 'mfcc'}, reshape=False)
+            img_orig_mfcc = audio_avif.matrix_to_image(
+                data_orig,
+                metadata={'rms': rms, 'type': 'mfcc', 'mel_bins': args.mel_bins},
+                reshape=False,
+            )
             orig_mfcc_path = os.path.join(file_output_dir, "original_mfcc.png")
             img_orig_mfcc.save(orig_mfcc_path, "PNG", exif=img_orig_mfcc.getexif())
 
@@ -407,7 +444,15 @@ def main():
         for q in qualities:
             # Data -> Image (Sequential Shifts)
             # We must pass the SAME metadata to ensure decoding works (min/max are computed inside if not passed, which is fine)
-            img = audio_avif.matrix_to_image(data_orig, metadata={'rms': rms, 'type': data_type}, reshape=use_square, stretch=args.stretch, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
+            img = audio_avif.matrix_to_image(
+                data_orig,
+                metadata={'rms': rms, 'type': data_type, 'mel_bins': args.mel_bins},
+                reshape=use_square,
+                stretch=args.stretch,
+                gaussian_blur=gaussian_blur,
+                horizontal_usm=horizontal_usm,
+                shift_key=shift_keys,
+            )
             
             # Save Compressed Image
             # Suffix shows all shifts if any
@@ -436,7 +481,11 @@ def main():
             
             # Data -> Wav
             if use_mfcc or meta_recon.get('type') == 'mfcc':
-                logmel_recon = audio_avif.mfcc_to_logmel(data_recon)
+                target_mel_bins = meta_recon.get('mel_bins') or args.mel_bins
+                logmel_recon = audio_avif.mfcc_to_logmel(
+                    data_recon,
+                    n_mels=target_mel_bins,
+                )
             else:
                 logmel_recon = data_recon
             
@@ -461,7 +510,13 @@ def main():
             recon_mel_path = None
             if use_mfcc or meta_recon.get('type') == 'mfcc':
                 img_recon_mel = audio_avif.matrix_to_image(
-                    logmel_recon, metadata={'rms': rms_recon, 'type': 'mel'}, reshape=False
+                    logmel_recon,
+                    metadata={
+                        'rms': rms_recon,
+                        'type': 'mel',
+                        'mel_bins': logmel_recon.shape[1],
+                    },
+                    reshape=False,
                 )
                 recon_mel_path = os.path.join(file_output_dir, f"q{q}{shift_suffix}_recon_mel.png")
                 img_recon_mel.save(recon_mel_path, "PNG", exif=img_recon_mel.getexif())
@@ -549,7 +604,7 @@ def main():
     generate_html(
         output_dir,
         results,
-        get_decoder_description(args.decoder, args.griffin_lim_iters),
+        get_decoder_description(args.decoder, args.griffin_lim_iters, args.mel_bins),
     )
     print(f"Done. Open {os.path.join(output_dir, 'index.html')} to view results.")
 

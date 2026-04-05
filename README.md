@@ -20,7 +20,7 @@
 - **采样率**: 16000 Hz (单声道)
 - **STFT 参数**: FFT size 1024, Window size 1024, Hop size 256 (16ms)
 - **窗函数**: Hann window
-- **Mel 滤波器**: 80 bands, 频率范围 80Hz - 7600Hz
+- **Mel 滤波器**: 默认 80 bands，频率范围 80Hz - 7600Hz
 - **关键细节**: 使用 **Slaney** 风格的 Mel 刻度和归一化 (Area Normalization)，取 $log_{10}$ 幅度谱 (with floor 1e-10)。
 > 可选：使用 `--mfcc <height>` 以 MFCC 特征进行编码（`height` 为 MFCC 图高度 / n_mfcc）。在 MFCC 模式下，HTML 报告会额外展示原始 Mel 频谱和解码后 Mel 频谱作为参考。
 
@@ -42,6 +42,7 @@
 - **重建后端**:
   - 默认使用预训练的 HiFi-GAN 模型 (`microsoft/speecht5_hifigan`) 将 Log-Mel 还原为时域波形。
   - 也支持不依赖神经声码器的 `librosa.feature.inverse.mel_to_stft(...) + Griffin-Lim` 模式，适合快速实验或避免下载 SpeechT5 vocoder。
+  - `--mel-bins` 可将 Log-Mel 维度改为 128 等其他值；其中 `SpeechT5 vocoder` 仍要求 80-bin，`Griffin-Lim` 可直接用于 128-bin round-trip。
 - **响度恢复**: 根据读取的 RMS 值对重建波形进行增益调整，使其响度与原始音频一致。
 
 ## 3. 注意事项
@@ -52,13 +53,16 @@
 2.  **Griffin-Lim 是免模型兜底方案**:
     `--decoder griffin-lim` 不需要加载 `SpeechT5`，但音质通常会明显弱于神经声码器，更适合做无模型验证、批处理冒烟或在缺少模型权重时快速试听。
 
-3.  **量化误差**:
+3.  **mel-128 等非默认配置更适合 Griffin-Lim**:
+    现在可以通过 `--mel-bins 128` 生成 128-bin 的 Log-Mel 图像并做 round-trip，但 `SpeechT5` 的预训练声码器输入维度固定为 80，所以 `--decoder=vocoder` 目前仍只能与 `--mel-bins 80` 搭配。
+
+4.  **量化误差**:
     当前方案将 float32 的 Mel 谱量化为 8-bit 整数保存为图像。这种量化本身会引入底噪，但在 AVIF 有损压缩的大幅失真面前，8-bit 量化噪声通常不是主要瓶颈。
 
-4.  **动态范围截断**:
+5.  **动态范围截断**:
     我们将 Log-Mel 的值域固定在 `[-11.0, 4.0]` 进行归一化。如果输入音频极其微弱或超出此范围，可能会导致截断失真（Clipping）。
 
-5.  **环境依赖**:
+6.  **环境依赖**:
     只有在读写 AVIF 时才需要安装 `pillow-avif-plugin`。如果环境里没有该插件，CLI 仍可使用 `--jpg` / `--webp-video`，以及 `--decoder griffin-lim` 进行无模型实验。macOS 上安装 AVIF 支持时可能需要注意 `libavif` 的系统库依赖。
 
 ## 4. Future Work
@@ -120,6 +124,9 @@ pip install -e .
 
     # Griffin-Lim 迭代次数可调
     audio-avif input.wav --output results_dir --decoder griffin-lim --griffin-lim-iters 64
+
+    # 使用 128-bin Log-Mel，并用 Griffin-Lim 做 round-trip
+    audio-avif input.wav --output results_dir --decoder griffin-lim --mel-bins 128
     ```
 
 2.  **解码模式**:
@@ -148,6 +155,7 @@ audio-avif --help
 
 - `--decoder {vocoder,griffin-lim}`: 选择波形重建后端。
 - `--griffin-lim-iters`: 指定 Griffin-Lim 迭代次数，默认 `32`。
+- `--mel-bins`: 指定 Log-Mel 维度，默认 `80`；若设为 `128`，建议搭配 `--decoder griffin-lim`。
 
 ### 6.2 Python API (作为编解码库使用)
 
@@ -178,6 +186,9 @@ wav_gl = audio_avif.reconstruct_wav(
     griffin_lim_iters=32,
 )
 wav_gl = audio_avif.apply_loudness(wav_gl, rms_recon)
+
+# 也可以直接提取 128-bin Log-Mel
+logmel_128, rms_128 = audio_avif.wav_to_logmel("input.wav", n_mels=128)
 
 # 3b. 使用 SpeechT5 HiFi-GAN
 device = audio_avif.get_device()
