@@ -18,12 +18,6 @@ class TestAudioAvif(unittest.TestCase):
         t = np.linspace(0, 1.0, sr, endpoint=False)
         audio = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 880 * t)
         sf.write(self.wav_path, audio, sr)
-        
-        try:
-            self.device = audio_avif.get_device()
-            self.vocoder = audio_avif.load_vocoder(self.device)
-        except Exception as e:
-            self.skipTest(f"Failed to load vocoder: {e}")
 
     def tearDown(self):
         if os.path.exists(self.wav_path):
@@ -49,20 +43,41 @@ class TestAudioAvif(unittest.TestCase):
         psnr = 20 * np.log10(1.0 / np.sqrt(mse))
         return psnr
 
+    def load_vocoder_or_skip(self):
+        try:
+            device = audio_avif.get_device()
+            vocoder = audio_avif.load_vocoder(device)
+        except Exception as e:
+            self.skipTest(f"Failed to load vocoder: {e}")
+        return device, vocoder
+
+    def estimate_peak_frequencies(self, waveform, sample_rate, top_k=20):
+        spectrum = np.abs(np.fft.rfft(waveform))
+        freqs = np.fft.rfftfreq(len(waveform), d=1.0 / sample_rate)
+        if len(spectrum) > 0:
+            spectrum[0] = 0.0
+        peak_indices = np.argsort(spectrum)[-top_k:]
+        return freqs[peak_indices]
+
     def test_compression_cycle_psnr(self):
+        self.device, self.vocoder = self.load_vocoder_or_skip()
+
+        temp_ext = ".avif" if audio_avif.HAS_AVIF else ".jpg"
+        temp_format = "AVIF" if audio_avif.HAS_AVIF else "JPEG"
+
         # 1. Wav -> Mel (with RMS)
         logmel, rms_orig = audio_avif.wav_to_logmel(self.wav_path)
         
-        # 2. Mel -> Image (AVIF Q90, embed RMS)
+        # 2. Mel -> Image (lossy image, embed RMS)
         img = audio_avif.logmel_to_image(logmel, rms=rms_orig)
-        temp_avif = os.path.join(self.test_dir, "temp.avif")
-        img.save(temp_avif, "AVIF", quality=90, exif=img.getexif())
+        temp_image = os.path.join(self.test_dir, f"temp{temp_ext}")
+        img.save(temp_image, temp_format, quality=90, exif=img.getexif())
         
         # 3. Image -> Mel (Extract RMS)
-        img_loaded = Image.open(temp_avif)
+        img_loaded = Image.open(temp_image)
         logmel_recon, rms_recon = audio_avif.image_to_logmel(img_loaded)
         
-        self.assertIsNotNone(rms_recon, "RMS metadata should be recovered from AVIF")
+        self.assertIsNotNone(rms_recon, "RMS metadata should be recovered from image metadata")
         self.assertAlmostEqual(rms_orig, rms_recon, places=4, msg="Recovered RMS should match original")
         
         # 4. Mel -> Wav
@@ -81,7 +96,7 @@ class TestAudioAvif(unittest.TestCase):
             "original_rms": float(rms_orig),
             "reconstructed_rms_before_align": float(np.sqrt(np.mean(wav_recon**2))),
             "reconstructed_rms_after_align": float(rms_final),
-            "metadata_rms": float(rms_recon) if rms_recon else None,
+            "metadata_rms": float(rms_recon) if rms_recon is not None else None,
             "note": "RMS stored in Exif/ImageDescription and applied."
         }
         
@@ -93,9 +108,29 @@ class TestAudioAvif(unittest.TestCase):
         print(f"\nTest Result - PSNR: {psnr:.2f} dB")
         print(f"Alignment Metadata Check: Orig={rms_orig:.4f}, Recon={rms_recon:.4f}")
         
-        os.remove(temp_avif)
+        os.remove(temp_image)
 
         self.assertTrue(psnr > 0, "PSNR should be positive")
+
+    def test_griffin_lim_reconstruction_cycle(self):
+        logmel, rms_orig = audio_avif.wav_to_logmel(self.wav_path)
+        img = audio_avif.logmel_to_image(logmel, rms=rms_orig)
+        logmel_recon, rms_recon = audio_avif.image_to_logmel(img)
+
+        wav_recon = audio_avif.reconstruct_wav(
+            logmel_recon,
+            decoder="griffin-lim",
+            griffin_lim_iters=12,
+        )
+        wav_recon_aligned = audio_avif.apply_loudness(wav_recon, rms_recon)
+
+        self.assertTrue(np.isfinite(wav_recon_aligned).all(), "Waveform should not contain NaN/Inf")
+        self.assertGreater(len(wav_recon_aligned), 0, "Waveform should not be empty")
+        self.assertGreater(np.sqrt(np.mean(wav_recon_aligned**2)), 1e-3, "Waveform should contain audible energy")
+
+        peaks = self.estimate_peak_frequencies(wav_recon_aligned, audio_avif.TARGET_SR)
+        self.assertTrue(np.any(np.abs(peaks - 440.0) < 35.0), "Should retain a peak near 440 Hz")
+        self.assertTrue(np.any(np.abs(peaks - 880.0) < 45.0), "Should retain a peak near 880 Hz")
 
     def test_reshape_logic(self):
         # Generate longer audio (5s) to trigger reshaping

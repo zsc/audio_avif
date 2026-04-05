@@ -5,7 +5,15 @@ import librosa
 from PIL import Image
 import audio_avif
 
-def generate_html(output_dir, results):
+def get_decoder_description(decoder, griffin_lim_iters):
+    if decoder == "griffin-lim":
+        return (
+            f"Using librosa mel inversion + Griffin-Lim "
+            f"({griffin_lim_iters} iterations) for waveform reconstruction."
+        )
+    return "Using microsoft/speecht5_hifigan for vocoding."
+
+def generate_html(output_dir, results, decoder_description):
     """
     Generates index.html
     results: list of dicts { 'name': 'filename', 'original': 'path/to/wav', 'variants': { '70': {'avif': '...', 'wav': '...'}, ... } }
@@ -35,7 +43,7 @@ def generate_html(output_dir, results):
 <body>
     <div class="container">
         <h1>Audio Compression via Image Mel-Spectrogram</h1>
-        <p>Using <code>microsoft/speecht5_hifigan</code> for vocoding.</p>
+        <p>DECODER_DESCRIPTION_PLACEHOLDER</p>
         
         <div id="samples">
             <!-- Samples will be injected here -->
@@ -164,11 +172,20 @@ def generate_html(output_dir, results):
     import json
     json_data = json.dumps(results)
     final_html = html_content.replace('DATA_PLACEHOLDER', json_data)
+    final_html = final_html.replace('DECODER_DESCRIPTION_PLACEHOLDER', decoder_description)
     
     with open(os.path.join(output_dir, 'index.html'), 'w') as f:
         f.write(final_html)
 
-def decode_file(input_img, output_wav, device, vocoder, is_mfcc=False):
+def decode_file(
+    input_img,
+    output_wav,
+    decoder,
+    griffin_lim_iters,
+    device=None,
+    vocoder=None,
+    is_mfcc=False,
+):
     print(f"Decoding {input_img} -> {output_wav}...")
     try:
         if input_img.lower().endswith('.webp'):
@@ -185,7 +202,13 @@ def decode_file(input_img, output_wav, device, vocoder, is_mfcc=False):
             else:
                 logmel = data
             
-        wav = audio_avif.reconstruct_wav(logmel, vocoder, device)
+        wav = audio_avif.reconstruct_wav(
+            logmel,
+            vocoder=vocoder,
+            device=device,
+            decoder=decoder,
+            griffin_lim_iters=griffin_lim_iters,
+        )
         
         if rms is not None:
             print(f"  Restoring loudness (RMS: {rms:.4f})...")
@@ -212,6 +235,18 @@ def main():
     parser.add_argument("--horizontal-gaussian", type=str, default=None, help="Add 1D horizontal Gaussian blur, e.g. '10,3' for kernel-size=10, sigma=3.")
     parser.add_argument("--horizontal-usm", type=str, default=None, help="Add 1D horizontal unsharp mask, e.g. '10,3,0.1' for kernel-size=10, sigma=3, strength=0.1.")
     parser.add_argument("--shift-key", type=str, default="0", help="Shift key (pitch) in pixels, comma-separated. E.g. '0' or '5,-5'.")
+    parser.add_argument(
+        "--decoder",
+        choices=audio_avif.DECODER_CHOICES,
+        default="vocoder",
+        help="Waveform reconstruction backend. 'vocoder' uses SpeechT5 HiFi-GAN; 'griffin-lim' avoids the neural vocoder.",
+    )
+    parser.add_argument(
+        "--griffin-lim-iters",
+        type=int,
+        default=audio_avif.DEFAULT_GRIFFIN_LIM_ITERS,
+        help="Number of Griffin-Lim iterations when --decoder=griffin-lim.",
+    )
     args = parser.parse_args()
 
     # Parse Shift Keys
@@ -244,11 +279,22 @@ def main():
     # Determine mode based on input extension
     input_ext = os.path.splitext(args.input)[1].lower()
     is_decoding = os.path.isfile(args.input) and input_ext in ['.avif', '.jpg', '.jpeg', '.webp', '.png']
+    if input_ext == ".avif" and not audio_avif.HAS_AVIF:
+        parser.error("AVIF input requires pillow-avif-plugin. Install it or decode a JPEG/WebP instead.")
+    if not is_decoding and not args.jpg and not args.png and not audio_avif.HAS_AVIF:
+        parser.error("AVIF output requires pillow-avif-plugin. Install it or rerun with --jpg or --png.")
     
-    # Setup device and model
-    device = audio_avif.get_device()
-    print(f"Loading SpeechT5HifiGan on {device}...")
-    vocoder = audio_avif.load_vocoder(device)
+    device = None
+    vocoder = None
+    if args.decoder == "vocoder":
+        device = audio_avif.get_device()
+        print(f"Loading SpeechT5HifiGan on {device}...")
+        vocoder = audio_avif.load_vocoder(device)
+    else:
+        print(
+            f"Using Griffin-Lim decoder "
+            f"({args.griffin_lim_iters} iterations, no SpeechT5 vocoder)."
+        )
 
     # --- DECODE MODE ---
     if is_decoding:
@@ -262,7 +308,15 @@ def main():
              os.makedirs(output_path, exist_ok=True)
              output_path = os.path.join(output_path, os.path.splitext(os.path.basename(args.input))[0] + ".wav")
              
-        decode_file(args.input, output_path, device, vocoder, is_mfcc=args.mfcc is not None)
+        decode_file(
+            args.input,
+            output_path,
+            decoder=args.decoder,
+            griffin_lim_iters=args.griffin_lim_iters,
+            device=device,
+            vocoder=vocoder,
+            is_mfcc=args.mfcc is not None,
+        )
         return
 
     # --- ENCODE/DEMO MODE (Existing Logic) ---
@@ -386,10 +440,17 @@ def main():
             else:
                 logmel_recon = data_recon
             
-            wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
+            # Mel -> Wav
+            wav_recon = audio_avif.reconstruct_wav(
+                logmel_recon,
+                vocoder=vocoder,
+                device=device,
+                decoder=args.decoder,
+                griffin_lim_iters=args.griffin_lim_iters,
+            )
             
             # Restore Loudness
-            if rms_recon:
+            if rms_recon is not None:
                 wav_recon = audio_avif.apply_loudness(wav_recon, rms_recon)
             
             # Save Wav
@@ -428,9 +489,6 @@ def main():
             if use_mfcc:
                 print("Warning: WebP Video experiment currently supports Mel-spectrogram only. Skipping.")
             else:
-                # Existing WebP logic... (Keep as is in original file, I'm replacing the block above so I need to be careful not to delete this if I replace huge chunk)
-                # Wait, I am replacing the *entire* file logic or just parts?
-                # I am replacing `decode_file` and `main`. So I need to include the WebP loop in `main` if I replace the whole `main`.
                 for q in audio_avif.QUALITIES:
                     if all(s == 0 for s in shift_keys):
                         shift_suffix = ""
@@ -440,13 +498,28 @@ def main():
                     webp_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}.webp")
                     
                     # Encode (Sequential Shifts)
-                    audio_avif.logmel_to_webp_anim(logmel, rms, webp_path, quality=q, chunk_width=128, gaussian_blur=gaussian_blur, horizontal_usm=horizontal_usm, shift_key=shift_keys)
+                    audio_avif.logmel_to_webp_anim(
+                        logmel_display,
+                        rms,
+                        webp_path,
+                        quality=q,
+                        chunk_width=128,
+                        gaussian_blur=gaussian_blur,
+                        horizontal_usm=horizontal_usm,
+                        shift_key=shift_keys,
+                    )
                     compressed_img_size = os.path.getsize(webp_path)
                     
                     # Decode
                     logmel_recon, rms_recon = audio_avif.webp_anim_to_logmel(webp_path)
-                    wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
-                    if rms_recon:
+                    wav_recon = audio_avif.reconstruct_wav(
+                        logmel_recon,
+                        vocoder=vocoder,
+                        device=device,
+                        decoder=args.decoder,
+                        griffin_lim_iters=args.griffin_lim_iters,
+                    )
+                    if rms_recon is not None:
                         wav_recon = audio_avif.apply_loudness(wav_recon, rms_recon)
                         
                     wav_recon_path = os.path.join(file_output_dir, f"webp_video_q{q}{shift_suffix}_recon.wav")
@@ -473,7 +546,11 @@ def main():
             'variants': variants
         })
 
-    generate_html(output_dir, results)
+    generate_html(
+        output_dir,
+        results,
+        get_decoder_description(args.decoder, args.griffin_lim_iters),
+    )
     print(f"Done. Open {os.path.join(output_dir, 'index.html')} to view results.")
 
 if __name__ == "__main__":

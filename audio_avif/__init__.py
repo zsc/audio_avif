@@ -1,15 +1,19 @@
 import os
 import math
 import json
+import warnings
 import numpy as np
 import soundfile as sf
 import librosa
-import torch
-import torchaudio
-from transformers import SpeechT5HifiGan
 from PIL import Image
-import pillow_avif
 from scipy.ndimage import gaussian_filter1d
+
+try:
+    import pillow_avif  # noqa: F401
+    HAS_AVIF = True
+except ImportError:
+    pillow_avif = None
+    HAS_AVIF = False
 
 # Constants
 TARGET_SR = 16000
@@ -22,8 +26,12 @@ FMAX = 7600
 MIN_DB = -11.0
 MAX_DB = 4.0
 QUALITIES = [70, 80, 85, 90, 95]
+DEFAULT_GRIFFIN_LIM_ITERS = 32
+DECODER_CHOICES = ("vocoder", "griffin-lim")
 
 def get_device():
+    import torch
+
     if torch.cuda.is_available():
         return "cuda"
     elif torch.backends.mps.is_available():
@@ -31,6 +39,8 @@ def get_device():
     return "cpu"
 
 def load_vocoder(device=None):
+    from transformers import SpeechT5HifiGan
+
     if device is None:
         device = get_device()
     vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan").to(device)
@@ -65,7 +75,7 @@ def wav_to_logmel(wav_path):
             center=True,
             pad_mode="reflect",
         )
-    )
+    ).astype(np.float64, copy=False)
 
     # Mel basis
     mel_basis = librosa.filters.mel(
@@ -76,9 +86,9 @@ def wav_to_logmel(wav_path):
         fmax=FMAX,
         htk=False,         # Slaney
         norm="slaney",     # Slaney
-    )
+    ).astype(np.float64, copy=False)
 
-    mel = mel_basis @ S
+    mel = np.einsum("mf,ft->mt", mel_basis, S, optimize=True)
     mel = np.maximum(mel, 1e-10)
     logmel = np.log10(mel) # (80, T)
 
@@ -221,7 +231,7 @@ def matrix_to_image(data, min_val=None, max_val=None, metadata=None, reshape=Fal
         metadata['orig_w'] = current_width
 
     img = Image.fromarray(img_data)
-    
+
     exif = img.getexif()
     exif[270] = json.dumps(metadata)
     # Caller must save with exif=img.getexif()
@@ -394,6 +404,7 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
     min_val = default_min
     max_val = default_max
     height = None
+    data_type = None
     
     exif = image.getexif()
     if exif and 270 in exif:
@@ -409,6 +420,7 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
                 if 'max_val' in meta:
                     max_val = meta['max_val']
                 height = meta.get('height')
+                data_type = meta.get('type')
         except json.JSONDecodeError:
             # Fallback to legacy
             if isinstance(desc, str) and desc.startswith("OriginalRMS:"):
@@ -451,7 +463,13 @@ def image_to_matrix(image, default_min=MIN_DB, default_max=MAX_DB):
     # De-normalize
     data = norm_data * (max_val - min_val) + min_val
     
-    return data, {'rms': rms, 'min_val': min_val, 'max_val': max_val, 'height': height}
+    return data, {
+        'rms': rms,
+        'min_val': min_val,
+        'max_val': max_val,
+        'height': height,
+        'type': data_type,
+    }
 
 def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
     """
@@ -460,16 +478,79 @@ def image_to_logmel(image, min_val=MIN_DB, max_val=MAX_DB):
     data, metadata = image_to_matrix(image, min_val, max_val)
     return data, metadata.get('rms')
 
-def reconstruct_wav(logmel, vocoder, device):
+def reconstruct_wav_with_vocoder(logmel, vocoder, device):
     """
     logmel: (T, 80)
     """
+    import torch
+
     spectrogram = torch.tensor(logmel).unsqueeze(0).to(device)
     
     with torch.no_grad():
         waveform = vocoder(spectrogram)
         
     return waveform.squeeze().cpu().numpy()
+
+def reconstruct_wav_with_griffin_lim(logmel, griffin_lim_iters=DEFAULT_GRIFFIN_LIM_ITERS):
+    """
+    Reconstructs waveform from SpeechT5-style log-mel without a neural vocoder.
+    """
+    mel = np.power(10.0, np.asarray(logmel, dtype=np.float64).T).astype(np.float64, copy=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*encountered in matmul.*",
+            category=RuntimeWarning,
+        )
+        magnitude = librosa.feature.inverse.mel_to_stft(
+            mel,
+            sr=TARGET_SR,
+            n_fft=N_FFT,
+            power=1.0,
+            fmin=FMIN,
+            fmax=FMAX,
+            htk=False,
+            norm="slaney",
+        )
+    if not np.isfinite(magnitude).all():
+        raise ValueError("mel_to_stft produced non-finite magnitudes")
+    waveform = librosa.griffinlim(
+        magnitude,
+        n_iter=griffin_lim_iters,
+        hop_length=HOP_LENGTH,
+        win_length=WIN_LENGTH,
+        n_fft=N_FFT,
+        window="hann",
+        center=True,
+        pad_mode="reflect",
+        random_state=0,
+    )
+    return np.asarray(waveform, dtype=np.float32)
+
+def reconstruct_wav(
+    logmel,
+    vocoder=None,
+    device=None,
+    decoder="vocoder",
+    griffin_lim_iters=DEFAULT_GRIFFIN_LIM_ITERS,
+):
+    """
+    Reconstructs waveform from (T, 80) log-mel.
+    """
+    if decoder == "vocoder":
+        if vocoder is None:
+            raise ValueError("vocoder decoder requires a loaded vocoder instance")
+        return reconstruct_wav_with_vocoder(logmel, vocoder, device)
+
+    if decoder == "griffin-lim":
+        return reconstruct_wav_with_griffin_lim(
+            logmel,
+            griffin_lim_iters=griffin_lim_iters,
+        )
+
+    raise ValueError(
+        f"Unsupported decoder '{decoder}'. Expected one of: {', '.join(DECODER_CHOICES)}"
+    )
 
 def apply_loudness(wav, target_rms):
     """

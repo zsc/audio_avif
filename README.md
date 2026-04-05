@@ -1,13 +1,13 @@
 # 基于图像压缩的音频编码实验
 
-本项目探索一种非传统的音频压缩方法：将音频转换为时频图（Mel Spectrogram），利用现代图像编码格式（AVIF）的高效压缩能力对谱图进行压缩，最后通过神经声码器（HiFi-GAN）将解码后的图像重建为音频。
+本项目探索一种非传统的音频压缩方法：将音频转换为时频图（Mel Spectrogram），利用现代图像编码格式（AVIF）的高效压缩能力对谱图进行压缩，最后通过神经声码器（HiFi-GAN）或经典的 Griffin-Lim 算法将解码后的图像重建为音频。
 
 ## 1. 背景
 
 传统音频编码（如 MP3, AAC, Opus）主要依赖心理声学模型去除人耳听觉掩蔽效应下的冗余信息。而随着生成式 AI 的发展，神经声码器（Neural Vocoder）展示了从低维特征（如 Mel 谱）高质量重建波形的能力。
 
 本项目旨在验证以下链路的可行性：
-> **音频波形 $\rightarrow$ 视觉谱图 $\rightarrow$ 图像压缩 (AVIF) $\rightarrow$ 视觉谱图 $\rightarrow$ 神经声码器 $\rightarrow$ 重建音频**
+> **音频波形 $\rightarrow$ 视觉谱图 $\rightarrow$ 图像压缩 (AVIF) $\rightarrow$ 视觉谱图 $\rightarrow$ 神经声码器 / Griffin-Lim $\rightarrow$ 重建音频**
 
 通过这种方式，我们将“时序信号压缩”问题转化为了“图像压缩”问题，利用 AVIF (基于 AV1 视频编码) 强大的帧内预测和量化能力来压缩声学特征。
 
@@ -39,7 +39,9 @@
 
 ### 2.3 音频重建 (Image $\to$ WAV)
 - **解码**: 读取图像（AVIF, JPEG 或 WebP），逆映射回浮点 Log-Mel 谱。同时读取 Exif 元数据中的 RMS 值。
-- **声码器**: 使用预训练的 HiFi-GAN 模型 (`microsoft/speecht5_hifigan`) 将 Mel 谱还原为时域波形。
+- **重建后端**:
+  - 默认使用预训练的 HiFi-GAN 模型 (`microsoft/speecht5_hifigan`) 将 Log-Mel 还原为时域波形。
+  - 也支持不依赖神经声码器的 `librosa.feature.inverse.mel_to_stft(...) + Griffin-Lim` 模式，适合快速实验或避免下载 SpeechT5 vocoder。
 - **响度恢复**: 根据读取的 RMS 值对重建波形进行增益调整，使其响度与原始音频一致。
 
 ## 3. 注意事项
@@ -47,14 +49,17 @@
 1.  **参数对齐至关重要**:
     HiFi-GAN 对输入的 Mel 谱特征非常敏感。如果计算 Mel 谱时使用了错误的参数（如使用了 HTK 风格而非 Slaney，或者使用了 `ln` 而非 `log10`），重建出的音频会有严重的金属音或噪声。本项目已严格校准至 SpeechT5 标准。
 
-2.  **量化误差**:
+2.  **Griffin-Lim 是免模型兜底方案**:
+    `--decoder griffin-lim` 不需要加载 `SpeechT5`，但音质通常会明显弱于神经声码器，更适合做无模型验证、批处理冒烟或在缺少模型权重时快速试听。
+
+3.  **量化误差**:
     当前方案将 float32 的 Mel 谱量化为 8-bit 整数保存为图像。这种量化本身会引入底噪，但在 AVIF 有损压缩的大幅失真面前，8-bit 量化噪声通常不是主要瓶颈。
 
-3.  **动态范围截断**:
+4.  **动态范围截断**:
     我们将 Log-Mel 的值域固定在 `[-11.0, 4.0]` 进行归一化。如果输入音频极其微弱或超出此范围，可能会导致截断失真（Clipping）。
 
-4.  **环境依赖**:
-    需要安装 `pillow-avif-plugin` 才能让 PIL 支持 AVIF 格式。macOS 上安装时可能需要注意 `libavif` 的系统库依赖。
+5.  **环境依赖**:
+    只有在读写 AVIF 时才需要安装 `pillow-avif-plugin`。如果环境里没有该插件，CLI 仍可使用 `--jpg` / `--webp-video`，以及 `--decoder griffin-lim` 进行无模型实验。macOS 上安装 AVIF 支持时可能需要注意 `libavif` 的系统库依赖。
 
 ## 4. Future Work
 
@@ -109,10 +114,16 @@ pip install -e .
 
     # 使用 MFCC 特征进行编码 (height 为 MFCC 图高度)
     audio-avif input.wav --output results_dir --mfcc 60
+
+    # 不加载 SpeechT5，直接用 Griffin-Lim 重建试听
+    audio-avif input.wav --output results_dir --decoder griffin-lim
+
+    # Griffin-Lim 迭代次数可调
+    audio-avif input.wav --output results_dir --decoder griffin-lim --griffin-lim-iters 64
     ```
 
 2.  **解码模式**:
-    脚本会根据文件扩展名自动识别输入格式（`.avif`, `.jpg`, `.jpeg`, `.webp`）。
+    脚本会根据文件扩展名自动识别输入格式（`.avif`, `.jpg`, `.jpeg`, `.webp`, `.png`）。
     ```bash
     # 将 input.avif 解码为 input.wav
     audio-avif input.avif
@@ -122,7 +133,21 @@ pip install -e .
 
     # 将 input.webp 解码为 output.wav
     audio-avif input.webp --output output.wav
+
+    # 不加载 SpeechT5，直接用 Griffin-Lim 从图像重建
+    audio-avif input.jpg --decoder griffin-lim --output output.wav
     ```
+
+常用帮助输出：
+
+```bash
+audio-avif --help
+```
+
+其中与 Griffin-Lim 相关的新参数为：
+
+- `--decoder {vocoder,griffin-lim}`: 选择波形重建后端。
+- `--griffin-lim-iters`: 指定 Griffin-Lim 迭代次数，默认 `32`。
 
 ### 6.2 Python API (作为编解码库使用)
 
@@ -133,27 +158,40 @@ import audio_avif
 from PIL import Image
 import soundfile as sf
 
-# 1. 准备环境 (加载声码器)
-device = audio_avif.get_device()
-vocoder = audio_avif.load_vocoder(device)
-
-# 2. 编码: WAV -> AVIF
+# 1. 编码: WAV -> AVIF
 # 提取 Log-Mel 谱
-logmel = audio_avif.wav_to_logmel("input.wav")
+logmel, rms = audio_avif.wav_to_logmel("input.wav")
 # 转换为图像并保存为 AVIF
-img = audio_avif.logmel_to_image(logmel)
+img = audio_avif.logmel_to_image(logmel, rms=rms)
 img.save("compressed.avif", "AVIF", quality=85)
 
-# 3. 解码: AVIF -> WAV
+# 2. 解码: AVIF -> Log-Mel
 # 加载 AVIF 图像
 img_loaded = Image.open("compressed.avif")
 # 还原 Log-Mel 谱
-logmel_recon = audio_avif.image_to_logmel(img_loaded)
-# 使用声码器重建音频
-wav_recon = audio_avif.reconstruct_wav(logmel_recon, vocoder, device)
+logmel_recon, rms_recon = audio_avif.image_to_logmel(img_loaded)
+
+# 3a. 使用 Griffin-Lim（免模型）
+wav_gl = audio_avif.reconstruct_wav(
+    logmel_recon,
+    decoder="griffin-lim",
+    griffin_lim_iters=32,
+)
+wav_gl = audio_avif.apply_loudness(wav_gl, rms_recon)
+
+# 3b. 使用 SpeechT5 HiFi-GAN
+device = audio_avif.get_device()
+vocoder = audio_avif.load_vocoder(device)
+wav_vocoder = audio_avif.reconstruct_wav(
+    logmel_recon,
+    vocoder=vocoder,
+    device=device,
+)
+wav_vocoder = audio_avif.apply_loudness(wav_vocoder, rms_recon)
 
 # 4. 保存结果
-sf.write("reconstructed.wav", wav_recon, audio_avif.TARGET_SR)
+sf.write("reconstructed_gl.wav", wav_gl, audio_avif.TARGET_SR)
+sf.write("reconstructed_vocoder.wav", wav_vocoder, audio_avif.TARGET_SR)
 ```
 
 ## 7. 测试
